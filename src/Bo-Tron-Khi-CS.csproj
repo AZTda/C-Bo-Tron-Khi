@@ -20,4 +20,8 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <Resource Include="gas_mixer_logo.png" />
+  </ItemGroup>
+
 </Project>
