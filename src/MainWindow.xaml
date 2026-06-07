@@ -535,8 +535,15 @@
                                     <Button Grid.Column="3" Content="📥 Import" Click="OnImportExcelClick" Margin="2,0,0,0" Height="26" FontSize="11"/>
                                 </Grid>
 
-                                <!-- Big Start Button -->
-                                <Button x:Name="BtnAutoStart" Content="Start" Click="OnStartClick" Background="#DBEAFE" Foreground="#1E40AF" Height="36" FontSize="15" FontWeight="Bold" Margin="0,6,0,0"/>
+                                 <!-- Big Start & Mix-DAC Buttons -->
+                                 <Grid Margin="0,6,0,0">
+                                     <Grid.ColumnDefinitions>
+                                         <ColumnDefinition Width="*"/>
+                                         <ColumnDefinition Width="*"/>
+                                     </Grid.ColumnDefinitions>
+                                     <Button x:Name="BtnAutoStart" Content="Start" Click="OnStartClick" Background="#DBEAFE" Foreground="#1E40AF" Height="36" FontSize="14" FontWeight="Bold" Margin="0,0,3,0"/>
+                                     <Button x:Name="BtnAutoMixDac" Grid.Column="1" Content="Start Mix-DAC" Click="OnAutoMixDacClick" Background="#D1FAE5" Foreground="#065F46" Height="36" FontSize="14" FontWeight="Bold" Margin="3,0,0,0"/>
+                                 </Grid>
                             </StackPanel>
                         </Grid>
                     </ScrollViewer>

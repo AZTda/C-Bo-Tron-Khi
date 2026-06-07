@@ -9,6 +9,7 @@ namespace Bo_Tron_Khi_CS
     {
         Idle,
         PreStabilization,
+        Stabilization,
         Exposure,
         Recovery
     }
@@ -75,6 +76,20 @@ namespace Bo_Tron_Khi_CS
             SafeShutdownFlows();
         }
 
+        private void WriteMfcFlow(byte ms, int ch, double flow)
+        {
+            int chIdx = ch - 1; // 1-indexed to 0-indexed
+            double factor = 1.0;
+            if (_config.mfc_factor != null && _config.mfc_factor.Count > chIdx)
+            {
+                factor = _config.mfc_factor[chIdx];
+            }
+
+            var floatRegs = ModbusHandler.FloatToRegs((float)(flow * factor));
+            _handler.WriteMultipleRegisters(ms, (ushort)(60 + chIdx * 3), new ushort[] { floatRegs[0], floatRegs[1] });
+            _handler.WriteSingleRegister(ms, (ushort)(60 + chIdx * 3 + 2), (ushort)(flow > 0.1 ? 1 : 0));
+        }
+
         private async Task RunSequence(List<RecipeStep> steps, CancellationToken token)
         {
             byte ms = (byte)_config.mixing_slave;
@@ -88,6 +103,16 @@ namespace Bo_Tron_Khi_CS
                     CurrentState = RecipeState.PreStabilization;
                     ActiveStepIndex = 0;
                     
+                    // Purging: MFC1 (Carrier) = Total Flow, all others = 0, Relay 1 (Valve) = OFF, Relay 2 (Pump) = ON
+                    _handler.WriteSingleRegister(ms, 20, 0); // Valve OFF (MFC1 -> Chamber)
+                    _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
+                    
+                    WriteMfcFlow(ms, 1, _config.total_flow);
+                    for (int ch = 2; ch <= 6; ch++)
+                    {
+                        WriteMfcFlow(ms, ch, 0.0);
+                    }
+
                     double stableTime = _config.stable_time;
                     double elapsed = 0;
                     bool premixTriggered = false;
@@ -105,21 +130,7 @@ namespace Bo_Tron_Khi_CS
                             {
                                 premixTriggered = true;
                                 ApplyStepFlows(steps[0], ms, es);
-                            }
-                        }
-                        else
-                        {
-                            // Purging: MFC1 (Carrier) = Total Flow, all others = 0, Relay 1 (Valve) = OFF, Relay 2 (Pump) = ON
-                            _handler.WriteSingleRegister(ms, 20, 0); // Valve OFF (MFC1 -> Chamber)
-                            _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
-                            
-                            // Set MFC1 to total flow, others to 0
-                            var carrierRegs = ModbusHandler.FloatToRegs((float)_config.total_flow);
-                            _handler.WriteMultipleRegisters(ms, 60, new ushort[] { carrierRegs[0], carrierRegs[1], 1 }); // MFC1 SP & DAC ON
-                            
-                            for (int ch = 1; ch < 6; ch++)
-                            {
-                                _handler.WriteSingleRegister(ms, (ushort)(60 + ch * 3 + 2), 0); // Disable other DACs
+                                _handler.WriteSingleRegister(ms, 20, 0); // Ensure valve remains OFF
                             }
                         }
 
@@ -135,6 +146,63 @@ namespace Bo_Tron_Khi_CS
                     token.ThrowIfCancellationRequested();
                     ActiveStepIndex = stepIdx;
                     RecipeStep step = steps[stepIdx];
+
+                    // --- STABILIZATION (HEATING) PHASE ---
+                    CurrentState = RecipeState.Stabilization;
+
+                    // Write target temperature and RUN E5CC
+                    ushort tempReg = (ushort)(step.Temp * 10);
+                    _handler.WriteSingleRegister(es, 0x2100, tempReg);
+                    _handler.WriteSingleRegister(es, 0x0000, 0); // RUN
+                    
+                    // Keep Valve OFF during stabilization (flush chamber with carrier)
+                    _handler.WriteSingleRegister(ms, 20, 0); 
+                    _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
+                    
+                    // Purging: MFC1 (Carrier) = Total Flow, all others = 0
+                    WriteMfcFlow(ms, 1, _config.total_flow);
+                    for (int ch = 2; ch <= 6; ch++)
+                    {
+                        WriteMfcFlow(ms, ch, 0.0);
+                    }
+
+                    double currentTemp = 25.0;
+                    DateTime stabilizationStart = DateTime.Now;
+                    bool tempReached = false;
+
+                    while (!tempReached)
+                    {
+                        token.ThrowIfCancellationRequested();
+
+                        try
+                        {
+                            var regs = _handler.ReadHoldingRegisters(es, 0x2000, 1);
+                            if (regs != null && regs.Length > 0)
+                            {
+                                currentTemp = regs[0] / 10.0;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Error reading temperature in stabilization: {ex.Message}");
+                        }
+
+                        if (Math.Abs(currentTemp - step.Temp) <= 1.5)
+                        {
+                            tempReached = true;
+                        }
+                        else if ((DateTime.Now - stabilizationStart).TotalSeconds > 600)
+                        {
+                            Console.WriteLine("Stabilization timeout reached. Proceeding to Exposure.");
+                            tempReached = true;
+                        }
+
+                        if (!tempReached)
+                        {
+                            ProgressUpdated?.Invoke(this, new RecipeProgressEventArgs(stepIdx, CurrentState, 0, $"Step {stepIdx + 1}/{steps.Count} - Heating ({currentTemp:F1}°C → {step.Temp:F1}°C)"));
+                            await Task.Delay(1000, token);
+                        }
+                    }
 
                     // --- EXPOSURE PHASE ---
                     CurrentState = RecipeState.Exposure;
@@ -160,21 +228,36 @@ namespace Bo_Tron_Khi_CS
                     
                     // Valve OFF (MFC1 Carrier -> Chamber, MFC2-6 -> Exhaust)
                     _handler.WriteSingleRegister(ms, 20, 0); 
+                    _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
                     
                     // Set MFC1 to total flow, disable other MFCs to save gas
-                    var carrierRegs = ModbusHandler.FloatToRegs((float)_config.total_flow);
-                    _handler.WriteMultipleRegisters(ms, 60, new ushort[] { carrierRegs[0], carrierRegs[1], 1 });
-                    for (int ch = 1; ch < 6; ch++)
+                    WriteMfcFlow(ms, 1, _config.total_flow);
+                    for (int ch = 2; ch <= 6; ch++)
                     {
-                        _handler.WriteSingleRegister(ms, (ushort)(60 + ch * 3 + 2), 0); // DAC off
+                        WriteMfcFlow(ms, ch, 0.0);
                     }
 
                     double recTime = step.RecoveryTime;
                     double recElapsed = 0;
+                    bool recoveryPremixTriggered = false;
+
                     while (recElapsed < recTime)
                     {
                         token.ThrowIfCancellationRequested();
                         double rem = recTime - recElapsed;
+
+                        // Check for pre-mix condition: within gas_on_time before recovery ends
+                        bool hasNext = (stepIdx + 1 < steps.Count);
+                        if (_config.gas_on_time > 0 && rem <= _config.gas_on_time && hasNext)
+                        {
+                            if (!recoveryPremixTriggered)
+                            {
+                                recoveryPremixTriggered = true;
+                                ApplyStepFlows(steps[stepIdx + 1], ms, es);
+                                _handler.WriteSingleRegister(ms, 20, 0); // Ensure valve remains OFF
+                            }
+                        }
+
                         ProgressUpdated?.Invoke(this, new RecipeProgressEventArgs(stepIdx, CurrentState, (int)Math.Ceiling(rem), $"Step {stepIdx + 1}/{steps.Count} - Recovery Phase - Rem: {(int)Math.Ceiling(rem)}s"));
                         await Task.Delay(500, token);
                         recElapsed += 0.5;
@@ -220,35 +303,12 @@ namespace Bo_Tron_Khi_CS
             _handler.WriteSingleRegister(es, 0x0000, 0); // Ensure E5CC is in RUN mode (write 0x0000)
 
             // Write MFC setpoints and enable DACs
-            // MFC1 (Carrier) - run at total flow to vent exhaust line
-            var q1Regs = ModbusHandler.FloatToRegs((float)tot);
-            _handler.WriteMultipleRegisters(ms, 60, new ushort[] { q1Regs[0], q1Regs[1] });
-            _handler.WriteSingleRegister(ms, 62, 1);
-
-            // MFC2 (Diluent)
-            var q2Regs = ModbusHandler.FloatToRegs((float)qmfc2);
-            _handler.WriteMultipleRegisters(ms, 63, new ushort[] { q2Regs[0], q2Regs[1] });
-            _handler.WriteSingleRegister(ms, 65, qmfc2 > 0.1 ? (ushort)1 : (ushort)0);
-
-            // MFC3 (G1 Low)
-            var q3Regs = ModbusHandler.FloatToRegs((float)qmfc3);
-            _handler.WriteMultipleRegisters(ms, 66, new ushort[] { q3Regs[0], q3Regs[1] });
-            _handler.WriteSingleRegister(ms, 68, qmfc3 > 0.1 ? (ushort)1 : (ushort)0);
-
-            // MFC4 (G1 High)
-            var q4Regs = ModbusHandler.FloatToRegs((float)qmfc4);
-            _handler.WriteMultipleRegisters(ms, 69, new ushort[] { q4Regs[0], q4Regs[1] });
-            _handler.WriteSingleRegister(ms, 71, qmfc4 > 0.1 ? (ushort)1 : (ushort)0);
-
-            // MFC5 (Gas 2)
-            var q5Regs = ModbusHandler.FloatToRegs((float)qmfc5);
-            _handler.WriteMultipleRegisters(ms, 72, new ushort[] { q5Regs[0], q5Regs[1] });
-            _handler.WriteSingleRegister(ms, 74, qmfc5 > 0.1 ? (ushort)1 : (ushort)0);
-
-            // MFC6 (Gas 3)
-            var q6Regs = ModbusHandler.FloatToRegs((float)qmfc6);
-            _handler.WriteMultipleRegisters(ms, 75, new ushort[] { q6Regs[0], q6Regs[1] });
-            _handler.WriteSingleRegister(ms, 77, qmfc6 > 0.1 ? (ushort)1 : (ushort)0);
+            WriteMfcFlow(ms, 1, tot); // MFC1 Carrier
+            WriteMfcFlow(ms, 2, qmfc2); // MFC2 Diluent
+            WriteMfcFlow(ms, 3, qmfc3); // MFC3 Gas 1 Low
+            WriteMfcFlow(ms, 4, qmfc4); // MFC4 Gas 1 High
+            WriteMfcFlow(ms, 5, qmfc5); // MFC5 Gas 2
+            WriteMfcFlow(ms, 6, qmfc6); // MFC6 Gas 3
         }
 
         private void SafeShutdownFlows()
@@ -260,11 +320,9 @@ namespace Bo_Tron_Khi_CS
                 _handler.WriteSingleRegister(ms, 20, 0); 
 
                 // Set all MFC flows to 0 and turn off all DACs
-                var zeroRegs = ModbusHandler.FloatToRegs(0.0f);
-                for (int ch = 0; ch < 6; ch++)
+                for (int ch = 1; ch <= 6; ch++)
                 {
-                    _handler.WriteMultipleRegisters(ms, (ushort)(60 + ch * 3), new ushort[] { zeroRegs[0], zeroRegs[1] });
-                    _handler.WriteSingleRegister(ms, (ushort)(60 + ch * 3 + 2), 0); // DAC off
+                    WriteMfcFlow(ms, ch, 0.0);
                 }
             }
             catch { }
