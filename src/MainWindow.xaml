@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         Title="Mix Gas-V1" 
-        Icon="gas_mixer_logo.png"
+        Icon="pack://application:,,,/gas_mixer_logo.png"
         Height="768" Width="1280"
         Background="#0B0F19"
         TextElement.Foreground="#F9FAFB"
@@ -458,14 +458,10 @@
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="65"/>
                                                 <ColumnDefinition Width="70"/>
-                                                <ColumnDefinition Width="65"/>
-                                                <ColumnDefinition Width="70"/>
-                                                <ColumnDefinition Width="70"/>
+                                                <ColumnDefinition Width="75"/>
                                                 <ColumnDefinition Width="70"/>
                                             </Grid.ColumnDefinitions>
                                             <Grid.RowDefinitions>
-                                                <RowDefinition Height="Auto"/>
-                                                <RowDefinition Height="Auto"/>
                                                 <RowDefinition Height="Auto"/>
                                             </Grid.RowDefinitions>
 
@@ -475,19 +471,6 @@
                                             
                                             <TextBlock Grid.Row="0" Grid.Column="2" Text="Gas On(s):" VerticalAlignment="Center" Margin="6,4,2,4"/>
                                             <TextBox x:Name="TxtGasOnTime" Grid.Row="0" Grid.Column="3" Text="10" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
-
-                                            <TextBlock Grid.Row="0" Grid.Column="4" Text="Total Flow:" VerticalAlignment="Center" Margin="6,4,2,4" FontSize="11"/>
-                                            <TextBox x:Name="TxtTotalFlow" Grid.Row="0" Grid.Column="5" Text="400.0" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
-
-                                            <!-- Row 1: CO1, CO2, CO3 Source Bottle PPM concentrations -->
-                                            <TextBlock Grid.Row="1" Grid.Column="0" Text="CO1(ppm):" VerticalAlignment="Center" Margin="2,4"/>
-                                            <TextBox x:Name="TxtCo1" Grid.Row="1" Grid.Column="1" Text="1000.0" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
-                                            
-                                            <TextBlock Grid.Row="1" Grid.Column="2" Text="CO2(ppm):" VerticalAlignment="Center" Margin="6,4,2,4"/>
-                                            <TextBox x:Name="TxtCo2" Grid.Row="1" Grid.Column="3" Text="100.0" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
-
-                                            <TextBlock Grid.Row="1" Grid.Column="4" Text="CO3(ppm):" VerticalAlignment="Center" Margin="6,4,2,4"/>
-                                            <TextBox x:Name="TxtCo3" Grid.Row="1" Grid.Column="5" Text="1000.0" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
                                         </Grid>
                                     </StackPanel>
                                 </Border>
@@ -535,15 +518,8 @@
                                     <Button Grid.Column="3" Content="📥 Import" Click="OnImportExcelClick" Margin="2,0,0,0" Height="26" FontSize="11"/>
                                 </Grid>
 
-                                 <!-- Big Start & Mix-DAC Buttons -->
-                                 <Grid Margin="0,6,0,0">
-                                     <Grid.ColumnDefinitions>
-                                         <ColumnDefinition Width="*"/>
-                                         <ColumnDefinition Width="*"/>
-                                     </Grid.ColumnDefinitions>
-                                     <Button x:Name="BtnAutoStart" Content="Start" Click="OnStartClick" Background="#DBEAFE" Foreground="#1E40AF" Height="36" FontSize="14" FontWeight="Bold" Margin="0,0,3,0"/>
-                                     <Button x:Name="BtnAutoMixDac" Grid.Column="1" Content="Start Mix-DAC" Click="OnAutoMixDacClick" Background="#D1FAE5" Foreground="#065F46" Height="36" FontSize="14" FontWeight="Bold" Margin="3,0,0,0"/>
-                                 </Grid>
+                                 <!-- Big Start Button -->
+                                 <Button x:Name="BtnAutoStart" Content="Start" Click="OnStartClick" Background="#DBEAFE" Foreground="#1E40AF" Height="36" FontSize="15" FontWeight="Bold" Margin="0,6,0,0"/>
                             </StackPanel>
                         </Grid>
                     </ScrollViewer>

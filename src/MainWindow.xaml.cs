@@ -38,7 +38,6 @@ namespace Bo_Tron_Khi_CS
         private DateTime _manualStartTime;
         private DispatcherTimer _manualTimer;
         private bool _isSyncingUI = false;
-        private bool _mixingDacRunning = false;
 
         // Custom Vector Colors
         private static readonly string[] GasColors = new string[] {
@@ -125,11 +124,6 @@ namespace Bo_Tron_Khi_CS
             _isSyncingUI = true;
             try
             {
-                TxtTotalFlow.Text = _config.total_flow.ToString("F1");
-                TxtCo1.Text = _config.co1.ToString("F1");
-                TxtCo2.Text = _config.co2.ToString("F1");
-                TxtCo3.Text = _config.co3.ToString("F1");
-
                 TxtStableTime.Text = _config.stable_time.ToString();
                 TxtGasOnTime.Text = _config.gas_on_time.ToString();
             }
@@ -147,10 +141,6 @@ namespace Bo_Tron_Khi_CS
 
             if (ParseUtil.TryParseInt(TxtStableTime.Text, out int st)) _config.stable_time = st;
             if (ParseUtil.TryParseInt(TxtGasOnTime.Text, out int go)) _config.gas_on_time = go;
-            if (ParseUtil.TryParseDouble(TxtTotalFlow.Text, out double tf)) _config.total_flow = tf;
-            if (ParseUtil.TryParseDouble(TxtCo1.Text, out double c1)) _config.co1 = c1;
-            if (ParseUtil.TryParseDouble(TxtCo2.Text, out double c2)) _config.co2 = c2;
-            if (ParseUtil.TryParseDouble(TxtCo3.Text, out double c3)) _config.co3 = c3;
 
             _config.Save();
             UpdateSidebarRangeLabels();
@@ -1558,11 +1548,6 @@ namespace Bo_Tron_Khi_CS
                 BtnAutoStart.Foreground = (Brush)new BrushConverter().ConvertFromString("#1E40AF");
             }
 
-            if (_mixingDacRunning)
-            {
-                StopMixDac();
-            }
-
             _currentMode = "Manual";
             OnModeChanged(null, null);
 
@@ -1743,11 +1728,6 @@ namespace Bo_Tron_Khi_CS
         {
             try
             {
-                // Parse inputs to config
-                _config.co1 = ParseUtil.ParseDouble(TxtCo1.Text, _config.co1);
-                _config.co2 = ParseUtil.ParseDouble(TxtCo2.Text, _config.co2);
-                _config.co3 = ParseUtil.ParseDouble(TxtCo3.Text, _config.co3);
-
                 byte ms = (byte)_config.mixing_slave;
                 byte es = (byte)_config.e5cc_slave;
 
@@ -1827,11 +1807,6 @@ namespace Bo_Tron_Khi_CS
             {
                 MessageBox.Show("No recipe steps loaded. Add or import steps first.", "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
-            }
-
-            if (_mixingDacRunning)
-            {
-                StopMixDac();
             }
 
             _config.stable_time = ParseUtil.ParseInt(TxtStableTime.Text, _config.stable_time);
@@ -2072,135 +2047,6 @@ namespace Bo_Tron_Khi_CS
             }));
         }
 
-        private void OnAutoMixDacClick(object sender, RoutedEventArgs e)
-        {
-            if (_currentMode != "Auto")
-            {
-                MessageBox.Show("Please switch to Auto mode first.", "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            if (_mixingDacRunning)
-            {
-                StopMixDac();
-            }
-            else
-            {
-                var selectedStep = DgridRecipe.SelectedItem as RecipeStep;
-                if (selectedStep == null)
-                {
-                    MessageBox.Show("Please select a recipe row to run Mix-DAC.", "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-
-                if (_recipeEngine.IsRunning)
-                {
-                    StopAutoRecipe();
-                }
-
-                StartMixDac(selectedStep);
-            }
-        }
-
-        private void StartMixDac(RecipeStep step)
-        {
-            _mixingDacRunning = true;
-            BtnAutoMixDac.Content = "Stop Mix-DAC";
-            BtnAutoMixDac.Background = (Brush)new BrushConverter().ConvertFromString("#EF4444");
-            BtnAutoMixDac.Foreground = Brushes.White;
-            BtnAutoStart.IsEnabled = false;
-
-            LblAutoPhaseStatus.Text = "Running Mix-DAC...";
-            LblStatusState.Text = "Status: Running Mix-DAC";
-
-            _logger.StartNewLog();
-
-            try
-            {
-                byte ms = (byte)_config.mixing_slave;
-                byte es = (byte)_config.e5cc_slave;
-
-                // E5CC temperature control
-                _handler.WriteSingleRegister(es, 0x2100, (ushort)(step.Temp * 10));
-                _handler.WriteSingleRegister(es, 0x0000, 0); // RUN
-
-                double tot = _config.total_flow;
-                double co1 = _config.co1;
-                double co2 = _config.co2;
-                double co3 = _config.co3;
-
-                // Clip and calculate flow values
-                double max_g1 = (tot > 0) ? (Math.Max(_config.mfc_max_sccm[2], _config.mfc_max_sccm[3]) / tot) * _config.co1 : 0;
-                double max_g2 = (tot > 0) ? (_config.mfc_max_sccm[4] / tot) * _config.co2 : 0;
-                double max_g3 = (tot > 0) ? (_config.mfc_max_sccm[5] / tot) * _config.co3 : 0;
-
-                double g1 = Math.Min(step.Gas1Ppm, max_g1);
-                double g2 = Math.Min(step.Gas2Ppm, max_g2);
-                double g3 = Math.Min(step.Gas3Ppm, max_g3);
-
-                double q1 = (co1 > 0) ? (g1 / co1) * tot : 0;
-                double qmfc3 = (q1 <= 100) ? q1 : 0;
-                double qmfc4 = (q1 <= 100) ? 0 : q1;
-                double qmfc5 = (co2 > 0) ? (g2 / co2) * tot : 0;
-                double qmfc6 = (co3 > 0) ? (g3 / co3) * tot : 0;
-
-                double qmfc2 = Math.Max(0.0, tot - qmfc3 - qmfc4 - qmfc5 - qmfc6);
-
-                // Write flows to Modbus (factors are applied in WriteMfcFlow)
-                WriteMfcFlow(1, tot);
-                WriteMfcFlow(2, qmfc2);
-                WriteMfcFlow(3, qmfc3);
-                WriteMfcFlow(4, qmfc4);
-                WriteMfcFlow(5, qmfc5);
-                WriteMfcFlow(6, qmfc6);
-
-                // Set valve ON (Relay 1 = 1, Relay 2 = 1)
-                _handler.WriteSingleRegister(ms, 20, 1);
-                _handler.WriteSingleRegister(ms, 21, 1);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Failed to start Mix-DAC: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                StopMixDac();
-            }
-        }
-
-        private void StopMixDac()
-        {
-            _mixingDacRunning = false;
-            BtnAutoMixDac.Content = "Start Mix-DAC";
-            BtnAutoMixDac.Background = (Brush)new BrushConverter().ConvertFromString("#D1FAE5");
-            BtnAutoMixDac.Foreground = (Brush)new BrushConverter().ConvertFromString("#065F46");
-            BtnAutoStart.IsEnabled = true;
-
-            LblAutoPhaseStatus.Text = "Stop";
-            LblStatusState.Text = "Status: Auto Mode - Ready";
-
-            _logger.StopLog();
-
-            // Safe shutdown of flows and temperature
-            try
-            {
-                byte ms = (byte)_config.mixing_slave;
-                byte es = (byte)_config.e5cc_slave;
-
-                _handler.WriteSingleRegister(es, 0x0000, 1); // Stop E5CC
-
-                // Valve OFF
-                _handler.WriteSingleRegister(ms, 20, 0);
-
-                // Set all MFC flows to 0 and disable DACs
-                for (int ch = 1; ch <= 6; ch++)
-                {
-                    WriteMfcFlow(ch, 0.0);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error stopping Mix-DAC: {ex.Message}");
-            }
-        }
-
         private void UpdateSidebarRangeLabels()
         {
             double tot = _config.total_flow;
@@ -2254,10 +2100,6 @@ namespace Bo_Tron_Khi_CS
 
         protected override void OnClosed(EventArgs e)
         {
-            if (_mixingDacRunning)
-            {
-                StopMixDac();
-            }
             _tickTimer?.Stop();
             _poller?.Stop();
             _recipeEngine?.Stop();

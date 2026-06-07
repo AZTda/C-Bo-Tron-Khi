@@ -97,46 +97,56 @@ namespace Bo_Tron_Khi_CS
 
             try
             {
-                // 1. Initial Pre-Stabilization (Air Purge)
+                // 1. Initial Pre-Stabilization (Air Purge & Pre-mix)
                 if (_config.stable_time > 0)
                 {
                     CurrentState = RecipeState.PreStabilization;
                     ActiveStepIndex = 0;
-                    
-                    // Purging: MFC1 (Carrier) = Total Flow, all others = 0, Relay 1 (Valve) = OFF, Relay 2 (Pump) = ON
-                    _handler.WriteSingleRegister(ms, 20, 0); // Valve OFF (MFC1 -> Chamber)
-                    _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
-                    
-                    WriteMfcFlow(ms, 1, _config.total_flow);
-                    for (int ch = 2; ch <= 6; ch++)
+
+                    int stableTime = _config.stable_time;
+                    int gasOnTime = _config.gas_on_time;
+                    int purgeTime = Math.Max(0, stableTime - gasOnTime);
+                    int premixTime = Math.Min(stableTime, gasOnTime);
+
+                    // --- PURGE PART ---
+                    if (purgeTime > 0)
                     {
-                        WriteMfcFlow(ms, ch, 0.0);
-                    }
-
-                    double stableTime = _config.stable_time;
-                    double elapsed = 0;
-                    bool premixTriggered = false;
-
-                    while (elapsed < stableTime)
-                    {
-                        token.ThrowIfCancellationRequested();
-
-                        double rem = stableTime - elapsed;
+                        // Valve OFF (MFC1 Carrier -> Chamber, others -> Exhaust)
+                        _handler.WriteSingleRegister(ms, 20, 0); 
+                        _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
                         
-                        // Check for pre-mix condition: when within gas_on_time before exposure starts
-                        if (_config.gas_on_time > 0 && rem <= _config.gas_on_time && steps.Count > 0)
+                        WriteMfcFlow(ms, 1, _config.total_flow);
+                        for (int ch = 2; ch <= 6; ch++)
                         {
-                            if (!premixTriggered)
-                            {
-                                premixTriggered = true;
-                                ApplyStepFlows(steps[0], ms, es);
-                                _handler.WriteSingleRegister(ms, 20, 0); // Ensure valve remains OFF
-                            }
+                            WriteMfcFlow(ms, ch, 0.0);
                         }
 
-                        ProgressUpdated?.Invoke(this, new RecipeProgressEventArgs(-1, CurrentState, (int)Math.Ceiling(rem), $"Pre-Stabilization (Air Purge) - Rem: {(int)Math.Ceiling(rem)}s"));
-                        await Task.Delay(500, token);
-                        elapsed += 0.5;
+                        double elapsed = 0;
+                        while (elapsed < purgeTime)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            double rem = stableTime - elapsed;
+                            ProgressUpdated?.Invoke(this, new RecipeProgressEventArgs(-1, CurrentState, (int)Math.Ceiling(rem), $"Pre-Stabilization (Air Purge) - Rem: {(int)Math.Ceiling(rem)}s"));
+                            await Task.Delay(500, token);
+                            elapsed += 0.5;
+                        }
+                    }
+
+                    // --- PRE-MIX PART ---
+                    if (premixTime > 0 && steps.Count > 0)
+                    {
+                        ApplyStepFlows(steps[0], ms, es);
+                        _handler.WriteSingleRegister(ms, 20, 0); // Ensure valve remains OFF
+
+                        double elapsed = 0;
+                        while (elapsed < premixTime)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            double rem = premixTime - elapsed;
+                            ProgressUpdated?.Invoke(this, new RecipeProgressEventArgs(-1, CurrentState, (int)Math.Ceiling(rem), $"Pre-Stabilization (Pre-mixing) - Rem: {(int)Math.Ceiling(rem)}s"));
+                            await Task.Delay(500, token);
+                            elapsed += 0.5;
+                        }
                     }
                 }
 
@@ -226,41 +236,52 @@ namespace Bo_Tron_Khi_CS
                     // --- RECOVERY PHASE ---
                     CurrentState = RecipeState.Recovery;
                     
-                    // Valve OFF (MFC1 Carrier -> Chamber, MFC2-6 -> Exhaust)
-                    _handler.WriteSingleRegister(ms, 20, 0); 
-                    _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
+                    int recTime = step.RecoveryTime;
+                    int gasOnTime = _config.gas_on_time;
+                    bool hasNext = (stepIdx + 1 < steps.Count);
                     
-                    // Set MFC1 to total flow, disable other MFCs to save gas
-                    WriteMfcFlow(ms, 1, _config.total_flow);
-                    for (int ch = 2; ch <= 6; ch++)
+                    int recPurgeTime = hasNext ? Math.Max(0, recTime - gasOnTime) : recTime;
+                    int recPremixTime = hasNext ? Math.Min(recTime, gasOnTime) : 0;
+
+                    // --- RECOVERY PURGE ---
+                    if (recPurgeTime > 0)
                     {
-                        WriteMfcFlow(ms, ch, 0.0);
-                    }
-
-                    double recTime = step.RecoveryTime;
-                    double recElapsed = 0;
-                    bool recoveryPremixTriggered = false;
-
-                    while (recElapsed < recTime)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        double rem = recTime - recElapsed;
-
-                        // Check for pre-mix condition: within gas_on_time before recovery ends
-                        bool hasNext = (stepIdx + 1 < steps.Count);
-                        if (_config.gas_on_time > 0 && rem <= _config.gas_on_time && hasNext)
+                        // Valve OFF (MFC1 Carrier -> Chamber, MFC2-6 -> Exhaust)
+                        _handler.WriteSingleRegister(ms, 20, 0); 
+                        _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
+                        
+                        WriteMfcFlow(ms, 1, _config.total_flow);
+                        for (int ch = 2; ch <= 6; ch++)
                         {
-                            if (!recoveryPremixTriggered)
-                            {
-                                recoveryPremixTriggered = true;
-                                ApplyStepFlows(steps[stepIdx + 1], ms, es);
-                                _handler.WriteSingleRegister(ms, 20, 0); // Ensure valve remains OFF
-                            }
+                            WriteMfcFlow(ms, ch, 0.0);
                         }
 
-                        ProgressUpdated?.Invoke(this, new RecipeProgressEventArgs(stepIdx, CurrentState, (int)Math.Ceiling(rem), $"Step {stepIdx + 1}/{steps.Count} - Recovery Phase - Rem: {(int)Math.Ceiling(rem)}s"));
-                        await Task.Delay(500, token);
-                        recElapsed += 0.5;
+                        double elapsed = 0;
+                        while (elapsed < recPurgeTime)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            double rem = recTime - elapsed;
+                            ProgressUpdated?.Invoke(this, new RecipeProgressEventArgs(stepIdx, CurrentState, (int)Math.Ceiling(rem), $"Step {stepIdx + 1}/{steps.Count} - Recovery Purge - Rem: {(int)Math.Ceiling(rem)}s"));
+                            await Task.Delay(500, token);
+                            elapsed += 0.5;
+                        }
+                    }
+
+                    // --- RECOVERY PRE-MIX ---
+                    if (recPremixTime > 0 && hasNext)
+                    {
+                        ApplyStepFlows(steps[stepIdx + 1], ms, es);
+                        _handler.WriteSingleRegister(ms, 20, 0); // Ensure valve remains OFF
+
+                        double elapsed = 0;
+                        while (elapsed < recPremixTime)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            double rem = recPremixTime - elapsed;
+                            ProgressUpdated?.Invoke(this, new RecipeProgressEventArgs(stepIdx, CurrentState, (int)Math.Ceiling(rem), $"Step {stepIdx + 1}/{steps.Count} - Recovery Pre-mixing - Rem: {(int)Math.Ceiling(rem)}s"));
+                            await Task.Delay(500, token);
+                            elapsed += 0.5;
+                        }
                     }
                 }
 
