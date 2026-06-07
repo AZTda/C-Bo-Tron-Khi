@@ -25,7 +25,7 @@ namespace Bo_Tron_Khi_CS
         {
             try
             {
-                if (double.TryParse(TxtLimit.Text, out double limit))
+                if (ParseUtil.TryParseDouble(TxtLimit.Text, out double limit))
                 {
                     _config.temp_alarm_limit = limit;
                 }

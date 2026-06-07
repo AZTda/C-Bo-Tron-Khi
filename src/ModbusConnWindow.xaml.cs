@@ -26,14 +26,39 @@ namespace Bo_Tron_Khi_CS
                 CbPorts.Items.Add(port);
             }
 
-            // Set selections
-            if (CbPorts.Items.Contains(_config.port))
+            bool isTcp = _config.port.StartsWith("TCP:");
+
+            // If it is serial and the configured port is not in the list, add it
+            if (!isTcp && !string.IsNullOrEmpty(_config.port) && !CbPorts.Items.Contains(_config.port))
             {
-                CbPorts.SelectedItem = _config.port;
+                CbPorts.Items.Add(_config.port);
+            }
+
+            // Set selections
+            if (isTcp)
+            {
+                CbPorts.SelectedIndex = 0; // default serial combo selection to sim since TCP is checked
+                var parts = _config.port.Split(':');
+                string ip = "127.0.0.1";
+                string portStr = "502";
+                if (parts.Length >= 2) ip = parts[1];
+                if (parts.Length >= 3) portStr = parts[2];
+                TxtTcpIp.Text = ip;
+                TxtTcpPort.Text = portStr;
             }
             else
             {
-                CbPorts.SelectedIndex = 0; // Default to Sim
+                TxtTcpIp.Text = "127.0.0.1";
+                TxtTcpPort.Text = "502";
+                
+                if (CbPorts.Items.Contains(_config.port))
+                {
+                    CbPorts.SelectedItem = _config.port;
+                }
+                else
+                {
+                    CbPorts.SelectedIndex = 0;
+                }
             }
 
             // Set baudrate
@@ -56,17 +81,47 @@ namespace Bo_Tron_Khi_CS
             TxtTimeout.Text = _config.timeout.ToString("F2");
             TxtMixingSlave.Text = _config.mixing_slave.ToString();
             TxtE5ccSlave.Text = _config.e5cc_slave.ToString();
-            ChkUseTcp.IsChecked = _config.port.StartsWith("TCP:"); // simple mapping or separate flag
+            ChkUseTcp.IsChecked = isTcp;
+
+            UpdateEnabledStates();
+        }
+
+        private void OnUseTcpChanged(object sender, RoutedEventArgs e)
+        {
+            UpdateEnabledStates();
+        }
+
+        private void UpdateEnabledStates()
+        {
+            if (CbPorts == null || CbBaud == null || CbParity == null || TxtTcpIp == null || TxtTcpPort == null) return;
+            
+            bool isTcp = ChkUseTcp.IsChecked == true;
+            CbPorts.IsEnabled = !isTcp;
+            CbBaud.IsEnabled = !isTcp;
+            CbParity.IsEnabled = !isTcp;
+            TxtTcpIp.IsEnabled = isTcp;
+            TxtTcpPort.IsEnabled = isTcp;
         }
 
         private void OnSaveClick(object sender, RoutedEventArgs e)
         {
             try
             {
-                _config.port = CbPorts.SelectedItem?.ToString() ?? "Virtual Sim";
+                if (ChkUseTcp.IsChecked == true)
+                {
+                    string ip = TxtTcpIp.Text.Trim();
+                    string portStr = TxtTcpPort.Text.Trim();
+                    if (string.IsNullOrEmpty(ip)) ip = "127.0.0.1";
+                    if (string.IsNullOrEmpty(portStr)) portStr = "502";
+                    _config.port = $"TCP:{ip}:{portStr}";
+                }
+                else
+                {
+                    _config.port = CbPorts.SelectedItem?.ToString() ?? "Virtual Sim";
+                }
                 
                 string baudText = (CbBaud.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content.ToString();
-                if (int.TryParse(baudText, out int baud))
+                if (ParseUtil.TryParseInt(baudText, out int baud))
                 {
                     _config.baudrate = baud;
                 }
@@ -76,17 +131,17 @@ namespace Bo_Tron_Khi_CS
                 else if (parityText.Contains("None")) _config.parity = "N";
                 else _config.parity = "E";
 
-                if (double.TryParse(TxtTimeout.Text, out double timeout))
+                if (ParseUtil.TryParseDouble(TxtTimeout.Text, out double timeout))
                 {
                     _config.timeout = timeout;
                 }
 
-                if (int.TryParse(TxtMixingSlave.Text, out int mixSlave))
+                if (ParseUtil.TryParseInt(TxtMixingSlave.Text, out int mixSlave))
                 {
                     _config.mixing_slave = mixSlave;
                 }
 
-                if (int.TryParse(TxtE5ccSlave.Text, out int e5ccSlave))
+                if (ParseUtil.TryParseInt(TxtE5ccSlave.Text, out int e5ccSlave))
                 {
                     _config.e5cc_slave = e5ccSlave;
                 }

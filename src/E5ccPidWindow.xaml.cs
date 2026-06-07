@@ -87,19 +87,19 @@ namespace Bo_Tron_Khi_CS
         {
             try
             {
-                float p = float.Parse(TxtP.Text);
-                ushort i = ushort.Parse(TxtI.Text);
-                float d = float.Parse(TxtD.Text);
-                ushort ctrlPeriod = ushort.Parse(TxtCtrlPeriod.Text);
-                float mvMax = float.Parse(TxtMvMax.Text);
-                float mvMin = float.Parse(TxtMvMin.Text);
+                float p = ParseUtil.ParseFloat(TxtP.Text);
+                ushort i = ParseUtil.ParseUshort(TxtI.Text);
+                float d = ParseUtil.ParseFloat(TxtD.Text);
+                ushort ctrlPeriod = ParseUtil.ParseUshort(TxtCtrlPeriod.Text);
+                float mvMax = ParseUtil.ParseFloat(TxtMvMax.Text);
+                float mvMin = ParseUtil.ParseFloat(TxtMvMin.Text);
 
-                float spMin = float.Parse(TxtSpMin.Text);
-                float spMax = float.Parse(TxtSpMax.Text);
-                float offset = float.Parse(TxtInputShift.Text);
+                float spMin = ParseUtil.ParseFloat(TxtSpMin.Text);
+                float spMax = ParseUtil.ParseFloat(TxtSpMax.Text);
+                float offset = ParseUtil.ParseFloat(TxtInputShift.Text);
 
-                float alm1 = float.Parse(TxtAlm1.Text);
-                float alm2 = float.Parse(TxtAlm2.Text);
+                float alm1 = ParseUtil.ParseFloat(TxtAlm1.Text);
+                float alm2 = ParseUtil.ParseFloat(TxtAlm2.Text);
 
                 // Update local SystemConfig
                 _config.temp_alarm_limit = alm1;

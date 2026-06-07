@@ -42,6 +42,7 @@ namespace Bo_Tron_Khi_CS
 
         private void OnConfigTextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
         {
+            if (_isRecalculating || _config == null || LblRangesInfo == null) return;
             RecalcRanges();
         }
 
@@ -49,7 +50,7 @@ namespace Bo_Tron_Khi_CS
         {
             if (_isRecalculating) return;
 
-            if (int.TryParse(TxtNumPoint.Text, out int n) && n >= 0)
+            if (ParseUtil.TryParseInt(TxtNumPoint.Text, out int n) && n >= 0)
             {
                 var steps = _main._recipeSteps;
                 if (steps.Count == n) return;
@@ -93,14 +94,30 @@ namespace Bo_Tron_Khi_CS
 
         private void RecalcRanges()
         {
-            if (_isRecalculating) return;
+            if (_isRecalculating || _config == null || LblRangesInfo == null) return;
             _isRecalculating = true;
             try
             {
-                if (!double.TryParse(TxtTotalFlow.Text, out double tot) || tot <= 0) return;
-                if (!double.TryParse(TxtCo1.Text, out double co1)) return;
-                if (!double.TryParse(TxtCo2.Text, out double co2)) return;
-                if (!double.TryParse(TxtCo3.Text, out double co3)) return;
+                if (!ParseUtil.TryParseDouble(TxtTotalFlow.Text, out double tot) || tot <= 0)
+                {
+                    _isRecalculating = false;
+                    return;
+                }
+                if (!ParseUtil.TryParseDouble(TxtCo1.Text, out double co1))
+                {
+                    _isRecalculating = false;
+                    return;
+                }
+                if (!ParseUtil.TryParseDouble(TxtCo2.Text, out double co2))
+                {
+                    _isRecalculating = false;
+                    return;
+                }
+                if (!ParseUtil.TryParseDouble(TxtCo3.Text, out double co3))
+                {
+                    _isRecalculating = false;
+                    return;
+                }
 
                 double maxTot = Math.Min(_config.mfc_max_sccm[0], _config.mfc_max_sccm[1]);
                 if (tot > maxTot)
@@ -144,7 +161,10 @@ namespace Bo_Tron_Khi_CS
             }
             catch
             {
-                LblRangesInfo.Text = "Recommended ppm range: calculation error";
+                if (LblRangesInfo != null)
+                {
+                    LblRangesInfo.Text = "Recommended ppm range: calculation error";
+                }
             }
             finally
             {
@@ -156,12 +176,12 @@ namespace Bo_Tron_Khi_CS
         {
             try
             {
-                if (int.TryParse(TxtStableTime.Text, out int st)) _config.stable_time = st;
-                if (double.TryParse(TxtTotalFlow.Text, out double tf)) _config.total_flow = tf;
-                if (int.TryParse(TxtGasOn.Text, out int go)) _config.gas_on_time = go;
-                if (double.TryParse(TxtCo1.Text, out double c1)) _config.co1 = c1;
-                if (double.TryParse(TxtCo2.Text, out double c2)) _config.co2 = c2;
-                if (double.TryParse(TxtCo3.Text, out double c3)) _config.co3 = c3;
+                if (ParseUtil.TryParseInt(TxtStableTime.Text, out int st)) _config.stable_time = st;
+                if (ParseUtil.TryParseDouble(TxtTotalFlow.Text, out double tf)) _config.total_flow = tf;
+                if (ParseUtil.TryParseInt(TxtGasOn.Text, out int go)) _config.gas_on_time = go;
+                if (ParseUtil.TryParseDouble(TxtCo1.Text, out double c1)) _config.co1 = c1;
+                if (ParseUtil.TryParseDouble(TxtCo2.Text, out double c2)) _config.co2 = c2;
+                if (ParseUtil.TryParseDouble(TxtCo3.Text, out double c3)) _config.co3 = c3;
 
                 _config.recipe_steps = _main._recipeSteps;
                 _config.Save();

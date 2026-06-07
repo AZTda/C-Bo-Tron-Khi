@@ -32,6 +32,13 @@ namespace Bo_Tron_Khi_CS
         private double _pumpAngle = 0;
         private DispatcherTimer _tickTimer;
 
+        // Manual Mode Engine State
+        private string _currentMode = "Manual";
+        private bool _manualRunning = false;
+        private DateTime _manualStartTime;
+        private DispatcherTimer _manualTimer;
+        private bool _isSyncingUI = false;
+
         // Custom Vector Colors
         private static readonly string[] GasColors = new string[] {
             "#38BDF8", // MFC1 (Carrier) - Light Blue
@@ -56,26 +63,21 @@ namespace Bo_Tron_Khi_CS
         private void InitializeApp()
         {
             _config = SystemConfig.Load();
-            _handler = new ModbusHandler
-            {
-                Port = _config.port,
-                Baudrate = _config.baudrate,
-                Parity = _config.parity,
-                Timeout = _config.timeout
-            };
-
+            _handler = new ModbusHandler();
+            ConfigureModbusHandler();
+ 
             _logger = new Logger();
             _recipeEngine = new RecipeEngine(_handler, _config);
             _recipeEngine.ProgressUpdated += OnRecipeProgress;
             _recipeEngine.RecipeCompleted += OnRecipeCompleted;
-
+ 
             // Load UI bindings
             SyncConfigToUI();
-
+ 
             // Populate table grid
             _recipeSteps.AddRange(_config.recipe_steps);
             DgridRecipe.ItemsSource = _recipeSteps;
-
+ 
             // Start Polling Engine
             _poller = new PollingEngine(_handler, _config);
             _poller.DataPolled += OnDataPolled;
@@ -83,23 +85,73 @@ namespace Bo_Tron_Khi_CS
             // Connect to default settings (Virtual Sim on fresh start)
             _handler.Connect();
             _poller.Start();
-
+ 
             // Start Animation Tick Timer (70ms)
             _tickTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(70) };
             _tickTimer.Tick += OnAnimationTick;
             _tickTimer.Start();
+
+            // Initialize Manual Mode Engine Timer (1s)
+            _manualTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _manualTimer.Tick += OnManualTimerTick;
+        }
+ 
+        private void ConfigureModbusHandler()
+        {
+            _handler.Port = _config.port;
+            _handler.Baudrate = _config.baudrate;
+            _handler.Parity = _config.parity;
+            _handler.Timeout = _config.timeout;
+            
+            if (!string.IsNullOrEmpty(_config.port) && _config.port.StartsWith("TCP:"))
+            {
+                _handler.IsTcp = true;
+                var parts = _config.port.Split(':');
+                if (parts.Length >= 2) _handler.TcpIp = parts[1];
+                if (parts.Length >= 3 && int.TryParse(parts[2], out int tp))
+                {
+                    _handler.TcpPort = tp;
+                }
+            }
+            else
+            {
+                _handler.IsTcp = false;
+            }
         }
 
         internal void SyncConfigToUI()
         {
-            TxtTotalFlow.Text = _config.total_flow.ToString("F1");
-            TxtCo1.Text = _config.co1.ToString("F1");
-            TxtCo2.Text = _config.co2.ToString("F1");
-            TxtCo3.Text = _config.co3.ToString("F1");
+            _isSyncingUI = true;
+            try
+            {
+                TxtTotalFlow.Text = _config.total_flow.ToString("F1");
+                TxtCo1.Text = _config.co1.ToString("F1");
+                TxtCo2.Text = _config.co2.ToString("F1");
+                TxtCo3.Text = _config.co3.ToString("F1");
 
-            TxtStableTime.Text = _config.stable_time.ToString();
-            TxtGasOnTime.Text = _config.gas_on_time.ToString();
+                TxtStableTime.Text = _config.stable_time.ToString();
+                TxtGasOnTime.Text = _config.gas_on_time.ToString();
+            }
+            finally
+            {
+                _isSyncingUI = false;
+            }
 
+            UpdateSidebarRangeLabels();
+        }
+
+        private void OnAutoConfigTextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (_isSyncingUI || _config == null) return;
+
+            if (ParseUtil.TryParseInt(TxtStableTime.Text, out int st)) _config.stable_time = st;
+            if (ParseUtil.TryParseInt(TxtGasOnTime.Text, out int go)) _config.gas_on_time = go;
+            if (ParseUtil.TryParseDouble(TxtTotalFlow.Text, out double tf)) _config.total_flow = tf;
+            if (ParseUtil.TryParseDouble(TxtCo1.Text, out double c1)) _config.co1 = c1;
+            if (ParseUtil.TryParseDouble(TxtCo2.Text, out double c2)) _config.co2 = c2;
+            if (ParseUtil.TryParseDouble(TxtCo3.Text, out double c3)) _config.co3 = c3;
+
+            _config.Save();
             UpdateSidebarRangeLabels();
         }
 
@@ -947,11 +999,85 @@ namespace Bo_Tron_Khi_CS
         // ===================================================
         private void HandleMfcClick(int channelIndex)
         {
-            // Open MFC Range limits settings dialog
-            var dlg = new MfcSettingWindow(_config, _handler) { Owner = this };
-            if (dlg.ShowDialog() == true)
+            if (_currentMode != "Manual")
             {
-                SyncConfigToUI();
+                MessageBox.Show("Please switch to Manual mode first.", "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            string ctrlType = (CbCtrlType.SelectedItem as ComboBoxItem)?.Content.ToString() ?? "Concentration";
+            if (!ctrlType.Contains("Flow"))
+            {
+                MessageBox.Show("MFC Flow can only be edited directly in 'Flow' control type.", "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            string title = $"Edit MFC {channelIndex + 1} Flow";
+            string prompt = "";
+            string currentVal = "";
+
+            if (channelIndex == 0)
+            {
+                prompt = "Enter total / carrier flow (sccm):";
+                currentVal = _config.total_flow.ToString("F1");
+            }
+            else if (channelIndex == 1)
+            {
+                MessageBox.Show("MFC2 (Diluent) flow is auto-calculated:\nTotal Flow - (Gas1 + Gas2 + Gas3).", "Info", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            else if (channelIndex == 2 || channelIndex == 3)
+            {
+                prompt = "Enter Gas 1 flow (sccm):";
+                currentVal = TxtManualGas1.Text;
+            }
+            else if (channelIndex == 4)
+            {
+                prompt = "Enter Gas 2 flow (sccm):";
+                currentVal = TxtManualGas2.Text;
+            }
+            else if (channelIndex == 5)
+            {
+                prompt = "Enter Gas 3 flow (sccm):";
+                currentVal = TxtManualGas3.Text;
+            }
+
+            if (!string.IsNullOrEmpty(prompt))
+            {
+                var dlg = new InputDialog(prompt, currentVal) { Owner = this };
+                if (dlg.ShowDialog() == true)
+                {
+                    if (ParseUtil.TryParseDouble(dlg.Answer, out double val) && val >= 0)
+                    {
+                        if (channelIndex == 0)
+                        {
+                            _config.total_flow = val;
+                            _config.Save();
+                            SyncConfigToUI();
+                        }
+                        else if (channelIndex == 2 || channelIndex == 3)
+                        {
+                            TxtManualGas1.Text = val.ToString("F1");
+                        }
+                        else if (channelIndex == 4)
+                        {
+                            TxtManualGas2.Text = val.ToString("F1");
+                        }
+                        else if (channelIndex == 5)
+                        {
+                            TxtManualGas3.Text = val.ToString("F1");
+                        }
+
+                        if (_manualRunning)
+                        {
+                            ApplyManualFlows();
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show("Please enter a valid positive number.", "Input Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    }
+                }
             }
         }
 
@@ -1236,10 +1362,7 @@ namespace Bo_Tron_Khi_CS
                 _config.Save();
                 _poller.Stop();
                 _handler.Disconnect();
-                _handler.Port = _config.port;
-                _handler.Baudrate = _config.baudrate;
-                _handler.Parity = _config.parity;
-                _handler.Timeout = _config.timeout;
+                ConfigureModbusHandler();
                 _handler.Connect();
                 _poller.Start();
                 SyncConfigToUI();
@@ -1434,7 +1557,7 @@ namespace Bo_Tron_Khi_CS
                 BtnAutoStart.Foreground = (Brush)new BrushConverter().ConvertFromString("#1E40AF");
             }
 
-            RadManualMode.IsChecked = true;
+            _currentMode = "Manual";
             OnModeChanged(null, null);
 
             BtnModeManual.Background = (Brush)new BrushConverter().ConvertFromString("#F97316");
@@ -1448,7 +1571,7 @@ namespace Bo_Tron_Khi_CS
 
         private void OnModeAutoClick(object sender, RoutedEventArgs e)
         {
-            RadAutoMode.IsChecked = true;
+            _currentMode = "Auto";
             OnModeChanged(null, null);
 
             BtnModeManual.Background = (Brush)new BrushConverter().ConvertFromString("#1F2937");
@@ -1464,7 +1587,7 @@ namespace Bo_Tron_Khi_CS
         private void OnModeChanged(object sender, RoutedEventArgs e)
         {
             if (PnlManualConfig == null || PnlAutoConfig == null) return;
-            if (RadManualMode.IsChecked == true)
+            if (_currentMode == "Manual")
             {
                 PnlManualConfig.Visibility = Visibility.Visible;
                 PnlAutoConfig.Visibility = Visibility.Collapsed;
@@ -1516,74 +1639,179 @@ namespace Bo_Tron_Khi_CS
         // ===================================================
         private void OnStartClick(object sender, RoutedEventArgs e)
         {
-            // Parse inputs to configuration model
-            if (double.TryParse(TxtCo1.Text, out double c1)) _config.co1 = c1;
-            if (double.TryParse(TxtCo2.Text, out double c2)) _config.co2 = c2;
-            if (double.TryParse(TxtCo3.Text, out double c3)) _config.co3 = c3;
-
-            _logger.StartNewLog();
-
-            if (RadManualMode.IsChecked == true)
+            if (_currentMode == "Manual")
             {
-                // MANUAL MODE WRITES
-                try
+                if (_manualRunning)
                 {
-                    byte ms = (byte)_config.mixing_slave;
-                    byte es = (byte)_config.e5cc_slave;
-
-                    string ctrlType = (CbCtrlType.SelectedItem as ComboBoxItem)?.Content.ToString() ?? "Concentration";
-                    if (ctrlType.Contains("Concentration"))
-                    {
-                        double tot = _config.total_flow;
-                        double temp = double.Parse(TxtManualTemp.Text);
-                        double g1 = double.Parse(TxtManualGas1.Text);
-                        double g2 = double.Parse(TxtManualGas2.Text);
-                        double g3 = double.Parse(TxtManualGas3.Text);
-
-                        double q1 = (c1 > 0) ? (g1 / c1) * tot : 0;
-                        double qmfc3 = (q1 <= 100) ? q1 : 0;
-                        double qmfc4 = (q1 <= 100) ? 0 : q1;
-                        double qmfc5 = (c2 > 0) ? (g2 / c2) * tot : 0;
-                        double qmfc6 = (c3 > 0) ? (g3 / c3) * tot : 0;
-
-                        double qmfc2 = Math.Max(0.0, tot - qmfc3 - qmfc4 - qmfc5 - qmfc6);
-
-                        // Write to devices
-                        _handler.WriteSingleRegister(es, 0x2100, (ushort)(temp * 10));
-                        _handler.WriteSingleRegister(es, 0x0000, 0); // E5CC RUN
-
-                        WriteMfcFlow(1, tot); // Carrier
-                        WriteMfcFlow(2, qmfc2); // Diluent
-                        WriteMfcFlow(3, qmfc3);
-                        WriteMfcFlow(4, qmfc4);
-                        WriteMfcFlow(5, qmfc5);
-                        WriteMfcFlow(6, qmfc6);
-                    }
-                    else
-                    {
-                        // Flow rate sccm direct writes
-                        double temp = double.Parse(TxtManualTemp.Text);
-                        _handler.WriteSingleRegister(es, 0x2100, (ushort)(temp * 10));
-                        _handler.WriteSingleRegister(es, 0x0000, 0); // E5CC RUN
-
-                        // Directly write MFC inputs parsed as flow
-                        WriteMfcFlow(1, double.Parse(TxtManualGas1.Text)); // MFC1 (Carrier input is mapped to field Gas1)
-                        WriteMfcFlow(2, double.Parse(TxtManualGas2.Text)); // MFC2 (Diluent input mapped to Gas2)
-                        WriteMfcFlow(3, double.Parse(TxtManualGas3.Text)); // etc
-                    }
-
-                    MessageBox.Show("Flow rates and temperature setpoint written successfully!", "Manual Start", MessageBoxButton.OK, MessageBoxImage.Information);
-                    LblStatusState.Text = "Status: Running (Manual)";
+                    StopManualMode();
                 }
-                catch (Exception ex)
+                else
                 {
-                    MessageBox.Show($"Failed to apply manual settings: {ex.Message}", "Manual Start Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    StartManualMode();
                 }
             }
             else
             {
                 // AUTO RECIPE START
                 StartAutoRecipe();
+            }
+        }
+
+        private void StartManualMode()
+        {
+            _manualRunning = true;
+            _manualStartTime = DateTime.Now;
+            
+            BtnManualStart.Content = "⏹ Stop";
+            BtnManualStart.Background = (Brush)new BrushConverter().ConvertFromString("#EF4444");
+            BtnManualStart.Foreground = Brushes.White;
+
+            _logger.StartNewLog();
+            
+            // RUN temperature controller
+            try
+            {
+                byte es = (byte)_config.e5cc_slave;
+                _handler.WriteSingleRegister(es, 0x0000, 0); // E5CC RUN
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in StartManualMode RUN: {ex.Message}");
+            }
+
+            ApplyManualFlows();
+            _manualTimer.Start();
+            
+            LblStatusState.Text = "Status: Running (Manual)";
+        }
+
+        private void StopManualMode()
+        {
+            _manualRunning = false;
+            _manualTimer.Stop();
+
+            BtnManualStart.Content = "▶ Start";
+            BtnManualStart.Background = (Brush)new BrushConverter().ConvertFromString("#2563EB");
+            BtnManualStart.Foreground = Brushes.White;
+
+            LblStatusState.Text = "Status: Manual Mode";
+            LblManualTime.Text = "0";
+
+            _logger.StopLog();
+
+            // Set all flows to 0 and E5CC to Stop
+            try
+            {
+                byte ms = (byte)_config.mixing_slave;
+                byte es = (byte)_config.e5cc_slave;
+
+                _handler.WriteSingleRegister(es, 0x0000, 1); // Stop E5CC
+
+                for (int ch = 1; ch <= 6; ch++)
+                {
+                    WriteMfcFlow(ch, 0.0);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in StopManualMode: {ex.Message}");
+            }
+        }
+
+        private void OnManualTimerTick(object sender, EventArgs e)
+        {
+            if (!_manualRunning || _currentMode != "Manual")
+            {
+                _manualTimer.Stop();
+                return;
+            }
+
+            ApplyManualFlows();
+
+            // Update elapsed time
+            var elapsed = (int)(DateTime.Now - _manualStartTime).TotalSeconds;
+            LblManualTime.Text = elapsed.ToString();
+        }
+
+        private void ApplyManualFlows()
+        {
+            try
+            {
+                // Parse inputs to config
+                _config.co1 = ParseUtil.ParseDouble(TxtCo1.Text, _config.co1);
+                _config.co2 = ParseUtil.ParseDouble(TxtCo2.Text, _config.co2);
+                _config.co3 = ParseUtil.ParseDouble(TxtCo3.Text, _config.co3);
+
+                byte ms = (byte)_config.mixing_slave;
+                byte es = (byte)_config.e5cc_slave;
+
+                string ctrlType = (CbCtrlType.SelectedItem as ComboBoxItem)?.Content.ToString() ?? "Concentration";
+                
+                double temp = ParseUtil.ParseDouble(TxtManualTemp.Text, 25.0);
+                
+                // Write temp SP
+                _handler.WriteSingleRegister(es, 0x2100, (ushort)(temp * 10));
+                _handler.WriteSingleRegister(es, 0x0000, 0); // RUN
+
+                double g1 = ParseUtil.ParseDouble(TxtManualGas1.Text, 0.0);
+                double g2 = ParseUtil.ParseDouble(TxtManualGas2.Text, 0.0);
+                double g3 = ParseUtil.ParseDouble(TxtManualGas3.Text, 0.0);
+
+                if (ctrlType.Contains("Concentration"))
+                {
+                    double tot = _config.total_flow;
+
+                    // Replicate Python's max gas range calculations and clipping
+                    double max_g1 = (tot > 0) ? (Math.Max(_config.mfc_max_sccm[2], _config.mfc_max_sccm[3]) / tot) * _config.co1 : 0;
+                    double max_g2 = (tot > 0) ? (_config.mfc_max_sccm[4] / tot) * _config.co2 : 0;
+                    double max_g3 = (tot > 0) ? (_config.mfc_max_sccm[5] / tot) * _config.co3 : 0;
+
+                    g1 = Math.Min(g1, max_g1);
+                    g2 = Math.Min(g2, max_g2);
+                    g3 = Math.Min(g3, max_g3);
+
+                    TxtManualGas1.Text = g1.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                    TxtManualGas2.Text = g2.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                    TxtManualGas3.Text = g3.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+
+                    double q1 = (_config.co1 > 0) ? (g1 / _config.co1) * tot : 0;
+                    double qmfc3 = (q1 <= 100) ? q1 : 0;
+                    double qmfc4 = (q1 <= 100) ? 0 : q1;
+                    double qmfc5 = (_config.co2 > 0) ? (g2 / _config.co2) * tot : 0;
+                    double qmfc6 = (_config.co3 > 0) ? (g3 / _config.co3) * tot : 0;
+
+                    double qmfc2 = Math.Max(0.0, tot - qmfc3 - qmfc4 - qmfc5 - qmfc6);
+
+                    WriteMfcFlow(1, tot); // Carrier
+                    WriteMfcFlow(2, qmfc2); // Diluent
+                    WriteMfcFlow(3, qmfc3);
+                    WriteMfcFlow(4, qmfc4);
+                    WriteMfcFlow(5, qmfc5);
+                    WriteMfcFlow(6, qmfc6);
+                }
+                else
+                {
+                    // Flow mode
+                    double max_q1 = Math.Max(_config.mfc_max_sccm[2], _config.mfc_max_sccm[3]);
+                    double max_q2 = _config.mfc_max_sccm[4];
+                    double max_q3 = _config.mfc_max_sccm[5];
+
+                    g1 = Math.Min(g1, max_q1);
+                    g2 = Math.Min(g2, max_q2);
+                    g3 = Math.Min(g3, max_q3);
+
+                    TxtManualGas1.Text = g1.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                    TxtManualGas2.Text = g2.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                    TxtManualGas3.Text = g3.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+
+                    WriteMfcFlow(1, g1); // Carrier mapped to gas1 input
+                    WriteMfcFlow(2, g2); // Diluent mapped to gas2
+                    WriteMfcFlow(3, g3); // Gas3 etc.
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in ApplyManualFlows: {ex.Message}");
             }
         }
 
@@ -1595,8 +1823,8 @@ namespace Bo_Tron_Khi_CS
                 return;
             }
 
-            if (int.TryParse(TxtStableTime.Text, out int st)) _config.stable_time = st;
-            if (int.TryParse(TxtGasOnTime.Text, out int go)) _config.gas_on_time = go;
+            _config.stable_time = ParseUtil.ParseInt(TxtStableTime.Text, _config.stable_time);
+            _config.gas_on_time = ParseUtil.ParseInt(TxtGasOnTime.Text, _config.gas_on_time);
 
             _recipeEngine.Start(_recipeSteps);
             BtnAutoStart.Content = "Stop";
@@ -1623,27 +1851,10 @@ namespace Bo_Tron_Khi_CS
         {
             _logger.StopLog();
 
-            if (RadManualMode.IsChecked == true)
+            if (_currentMode == "Manual")
             {
-                // Set all MFCs flows to 0 and turn off E5CC RUN mode
-                try
-                {
-                    byte ms = (byte)_config.mixing_slave;
-                    byte es = (byte)_config.e5cc_slave;
-
-                    _handler.WriteSingleRegister(es, 0x0000, 1); // Stop E5CC
-
-                    for (int ch = 1; ch <= 6; ch++)
-                    {
-                        WriteMfcFlow(ch, 0.0);
-                    }
-                    MessageBox.Show("System flow rates shut down successfully.", "Stop Complete", MessageBoxButton.OK, MessageBoxImage.Information);
-                    LblStatusState.Text = "Status: Manual Mode";
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Error during manual stop: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
+                StopManualMode();
+                MessageBox.Show("System flow rates shut down successfully.", "Stop Complete", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             else
             {
@@ -1678,7 +1889,7 @@ namespace Bo_Tron_Khi_CS
 
         private void OnManualValveClick(object sender, RoutedEventArgs e)
         {
-            if (RadManualMode.IsChecked != true)
+            if (_currentMode != "Manual")
             {
                 MessageBox.Show("Please switch to Manual mode first.", "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
@@ -1702,7 +1913,7 @@ namespace Bo_Tron_Khi_CS
 
         private void OnManualPumpClick(object sender, RoutedEventArgs e)
         {
-            if (RadManualMode.IsChecked != true)
+            if (_currentMode != "Manual")
             {
                 MessageBox.Show("Please switch to Manual mode first.", "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
@@ -1908,6 +2119,57 @@ namespace Bo_Tron_Khi_CS
             _recipeEngine?.Stop();
             _handler?.Disconnect();
             base.OnClosed(e);
+        }
+    }
+
+    public class InputDialog : Window
+    {
+        private TextBox txtInput;
+        public string Answer { get; private set; }
+
+        public InputDialog(string question, string defaultAnswer = "")
+        {
+            Title = "Input Dialog";
+            Width = 350;
+            Height = 150;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            ResizeMode = ResizeMode.NoResize;
+            Background = (Brush)Application.Current.Resources["CardBrush"] ?? new SolidColorBrush(Color.FromRgb(22, 27, 34));
+            Foreground = (Brush)Application.Current.Resources["TextPriBrush"] ?? Brushes.White;
+
+            var grid = new Grid { Margin = new Thickness(15) };
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var lbl = new TextBlock { Text = question, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 10), Foreground = Foreground };
+            grid.Children.Add(lbl);
+            Grid.SetRow(lbl, 0);
+
+            txtInput = new TextBox
+            {
+                Text = defaultAnswer,
+                Height = 26,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Background = (Brush)Application.Current.Resources["BgBrush"] ?? new SolidColorBrush(Color.FromRgb(8, 12, 20)),
+                Foreground = Foreground,
+                BorderBrush = (Brush)Application.Current.Resources["BorderBrush"] ?? new SolidColorBrush(Color.FromRgb(33, 38, 45))
+            };
+            grid.Children.Add(txtInput);
+            Grid.SetRow(txtInput, 1);
+
+            var sp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            var btnOk = new Button { Content = "OK", Width = 70, Height = 26, IsDefault = true, Margin = new Thickness(0, 0, 10, 0) };
+            btnOk.Click += (s, e) => { Answer = txtInput.Text; DialogResult = true; };
+            var btnCancel = new Button { Content = "Cancel", Width = 70, Height = 26, IsCancel = true };
+            sp.Children.Add(btnOk);
+            sp.Children.Add(btnCancel);
+            grid.Children.Add(sp);
+            Grid.SetRow(sp, 2);
+
+            Content = grid;
+            txtInput.Focus();
+            txtInput.SelectAll();
         }
     }
 }

@@ -106,4 +106,64 @@ namespace Bo_Tron_Khi_CS
             }
         }
     }
+
+    public static class ParseUtil
+    {
+        public static double ParseDouble(string text, double defaultVal = 0.0)
+        {
+            if (string.IsNullOrEmpty(text)) return defaultVal;
+            text = text.Replace(',', '.').Trim();
+            if (double.TryParse(text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double val))
+            {
+                return val;
+            }
+            return defaultVal;
+        }
+
+        public static float ParseFloat(string text, float defaultVal = 0.0f)
+        {
+            if (string.IsNullOrEmpty(text)) return defaultVal;
+            text = text.Replace(',', '.').Trim();
+            if (float.TryParse(text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out float val))
+            {
+                return val;
+            }
+            return defaultVal;
+        }
+
+        public static int ParseInt(string text, int defaultVal = 0)
+        {
+            if (string.IsNullOrEmpty(text)) return defaultVal;
+            if (int.TryParse(text.Trim(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out int val))
+            {
+                return val;
+            }
+            return defaultVal;
+        }
+
+        public static ushort ParseUshort(string text, ushort defaultVal = 0)
+        {
+            if (string.IsNullOrEmpty(text)) return defaultVal;
+            if (ushort.TryParse(text.Trim(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out ushort val))
+            {
+                return val;
+            }
+            return defaultVal;
+        }
+        
+        public static bool TryParseDouble(string text, out double result)
+        {
+            result = 0.0;
+            if (string.IsNullOrEmpty(text)) return false;
+            text = text.Replace(',', '.').Trim();
+            return double.TryParse(text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out result);
+        }
+
+        public static bool TryParseInt(string text, out int result)
+        {
+            result = 0;
+            if (string.IsNullOrEmpty(text)) return false;
+            return int.TryParse(text.Trim(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out result);
+        }
+    }
 }

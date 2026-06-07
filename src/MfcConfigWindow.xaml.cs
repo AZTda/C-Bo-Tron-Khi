@@ -91,10 +91,10 @@ namespace Bo_Tron_Khi_CS
                     int idx = ch - 1;
                     GetFields(ch, out TextBox minS, out TextBox maxS, out TextBox minV, out TextBox maxV);
 
-                    float minSccm = float.Parse(minS.Text);
-                    float maxSccm = float.Parse(maxS.Text);
-                    float minVolt = float.Parse(minV.Text);
-                    float maxVolt = float.Parse(maxV.Text);
+                    float minSccm = ParseUtil.ParseFloat(minS.Text);
+                    float maxSccm = ParseUtil.ParseFloat(maxS.Text);
+                    float minVolt = ParseUtil.ParseFloat(minV.Text);
+                    float maxVolt = ParseUtil.ParseFloat(maxV.Text);
 
                     // Update local SystemConfig (note mV scaling for local config)
                     _config.mfc_max_sccm[idx] = maxSccm;

@@ -36,15 +36,15 @@ namespace Bo_Tron_Khi_CS
             try
             {
                 double[] ranges = new double[6];
-                ranges[0] = double.Parse(TxtMfc1Range.Text);
-                ranges[1] = double.Parse(TxtMfc2Range.Text);
-                ranges[2] = double.Parse(TxtMfc3Range.Text);
-                ranges[3] = double.Parse(TxtMfc4Range.Text);
-                ranges[4] = double.Parse(TxtMfc5Range.Text);
-                ranges[5] = double.Parse(TxtMfc6Range.Text);
+                ranges[0] = ParseUtil.ParseDouble(TxtMfc1Range.Text);
+                ranges[1] = ParseUtil.ParseDouble(TxtMfc2Range.Text);
+                ranges[2] = ParseUtil.ParseDouble(TxtMfc3Range.Text);
+                ranges[3] = ParseUtil.ParseDouble(TxtMfc4Range.Text);
+                ranges[4] = ParseUtil.ParseDouble(TxtMfc5Range.Text);
+                ranges[5] = ParseUtil.ParseDouble(TxtMfc6Range.Text);
 
-                double uLimit = double.Parse(TxtULimit.Text);
-                double lLimit = double.Parse(TxtLLimit.Text);
+                double uLimit = ParseUtil.ParseDouble(TxtULimit.Text);
+                double lLimit = ParseUtil.ParseDouble(TxtLLimit.Text);
 
                 // Save to local configuration
                 for (int i = 0; i < 6; i++)

@@ -23,135 +23,7 @@
             <Setter Property="Margin" Value="4"/>
         </Style>
 
-        <!-- Clean Textbox Style -->
-        <Style TargetType="TextBox">
-            <Setter Property="Background" Value="{DynamicResource BgBrush}"/>
-            <Setter Property="Foreground" Value="{DynamicResource TextPriBrush}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-            <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="6,4"/>
-            <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="Height" Value="26"/>
-            <Style.Triggers>
-                <Trigger Property="IsFocused" Value="True">
-                    <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
-                </Trigger>
-            </Style.Triggers>
-        </Style>
 
-        <!-- ComboBox Toggle Button Template -->
-        <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
-            <Border x:Name="Border" CornerRadius="4" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition />
-                        <ColumnDefinition Width="20" />
-                    </Grid.ColumnDefinitions>
-                    <!-- Custom Arrow icon -->
-                    <Path x:Name="Arrow" Grid.Column="1" Fill="{DynamicResource TextSecBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" Data="M 0 0 L 4 4 L 8 0 Z" />
-                </Grid>
-            </Border>
-            <ControlTemplate.Triggers>
-                <Trigger Property="IsMouseOver" Value="True">
-                    <Setter TargetName="Border" Property="Background" Value="{DynamicResource HoverBrush}" />
-                </Trigger>
-                <Trigger Property="IsChecked" Value="True">
-                    <Setter TargetName="Border" Property="Background" Value="{DynamicResource CardBrush}" />
-                </Trigger>
-            </ControlTemplate.Triggers>
-        </ControlTemplate>
-
-        <!-- ComboBox Dark Style -->
-        <Style TargetType="ComboBox">
-            <Setter Property="Background" Value="{DynamicResource CardBrush}"/>
-            <Setter Property="Foreground" Value="{DynamicResource TextPriBrush}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-            <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="8,4"/>
-            <Setter Property="Height" Value="28"/>
-            <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="ComboBox">
-                        <Grid>
-                            <!-- The toggle button that acts as the background/border/arrow -->
-                            <ToggleButton Name="ToggleButton" 
-                                          Template="{StaticResource ComboBoxToggleButton}" 
-                                          Background="{TemplateBinding Background}" 
-                                          BorderBrush="{TemplateBinding BorderBrush}" 
-                                          BorderThickness="{TemplateBinding BorderThickness}"
-                                          Focusable="false"
-                                          IsChecked="{Binding Path=IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" 
-                                          ClickMode="Press"/>
-                            
-                            <!-- Content presenter to show the selected item -->
-                            <ContentPresenter Name="ContentSite" 
-                                              IsHitTestVisible="False" 
-                                              Content="{TemplateBinding SelectionBoxItem}"
-                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
-                                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
-                                              Margin="{TemplateBinding Padding}"
-                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
-                                              HorizontalAlignment="Left"/>
-                            
-                            <!-- The dropdown popup -->
-                            <Popup Name="Popup" 
-                                   Placement="Bottom" 
-                                   IsOpen="{TemplateBinding IsDropDownOpen}" 
-                                   AllowsTransparency="True" 
-                                   Focusable="False" 
-                                   PopupAnimation="Slide">
-                                <Grid Name="DropDown" 
-                                      SnapsToDevicePixels="True" 
-                                      MinWidth="{TemplateBinding ActualWidth}" 
-                                      MaxHeight="{TemplateBinding MaxDropDownHeight}">
-                                    <Border Name="DropDownBorder" 
-                                            Background="{DynamicResource CardBrush}" 
-                                            BorderBrush="{DynamicResource BorderBrush}" 
-                                            BorderThickness="1" 
-                                            CornerRadius="4"
-                                            Margin="0,2,0,0"/>
-                                    <ScrollViewer Margin="4" SnapsToDevicePixels="True">
-                                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained" />
-                                    </ScrollViewer>
-                                </Grid>
-                            </Popup>
-                        </Grid>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="HasItems" Value="false">
-                                <Setter TargetName="DropDownBorder" Property="MinHeight" Value="95"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
-        <!-- ComboBoxItem Style -->
-        <Style TargetType="ComboBoxItem">
-            <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Foreground" Value="{DynamicResource TextPriBrush}"/>
-            <Setter Property="Padding" Value="8,4"/>
-            <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="ComboBoxItem">
-                        <Border Name="Border" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="true" CornerRadius="2">
-                            <ContentPresenter />
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="true">
-                                <Setter TargetName="Border" Property="Background" Value="{DynamicResource HoverBrush}"/>
-                            </Trigger>
-                            <Trigger Property="IsSelected" Value="true">
-                                <Setter TargetName="Border" Property="Background" Value="{DynamicResource AccentBrush}"/>
-                                <Setter Property="Foreground" Value="White"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
 
         <!-- TabControl Style -->
         <Style TargetType="TabControl">
@@ -598,23 +470,23 @@
 
                                             <!-- Row 0: Stable, Gas On -->
                                             <TextBlock Grid.Row="0" Grid.Column="0" Text="Stable(s):" VerticalAlignment="Center" Margin="2,4"/>
-                                            <TextBox x:Name="TxtStableTime" Grid.Row="0" Grid.Column="1" Text="10" HorizontalContentAlignment="Right" Margin="2" Height="22"/>
+                                            <TextBox x:Name="TxtStableTime" Grid.Row="0" Grid.Column="1" Text="10" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
                                             
                                             <TextBlock Grid.Row="0" Grid.Column="2" Text="Gas On(s):" VerticalAlignment="Center" Margin="6,4,2,4"/>
-                                            <TextBox x:Name="TxtGasOnTime" Grid.Row="0" Grid.Column="3" Text="10" HorizontalContentAlignment="Right" Margin="2" Height="22"/>
+                                            <TextBox x:Name="TxtGasOnTime" Grid.Row="0" Grid.Column="3" Text="10" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
 
                                             <TextBlock Grid.Row="0" Grid.Column="4" Text="Total Flow:" VerticalAlignment="Center" Margin="6,4,2,4" FontSize="11"/>
-                                            <TextBox x:Name="TxtTotalFlow" Grid.Row="0" Grid.Column="5" Text="400.0" HorizontalContentAlignment="Right" Margin="2" Height="22"/>
+                                            <TextBox x:Name="TxtTotalFlow" Grid.Row="0" Grid.Column="5" Text="400.0" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
 
                                             <!-- Row 1: CO1, CO2, CO3 Source Bottle PPM concentrations -->
                                             <TextBlock Grid.Row="1" Grid.Column="0" Text="CO1(ppm):" VerticalAlignment="Center" Margin="2,4"/>
-                                            <TextBox x:Name="TxtCo1" Grid.Row="1" Grid.Column="1" Text="1000.0" HorizontalContentAlignment="Right" Margin="2" Height="22"/>
+                                            <TextBox x:Name="TxtCo1" Grid.Row="1" Grid.Column="1" Text="1000.0" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
                                             
                                             <TextBlock Grid.Row="1" Grid.Column="2" Text="CO2(ppm):" VerticalAlignment="Center" Margin="6,4,2,4"/>
-                                            <TextBox x:Name="TxtCo2" Grid.Row="1" Grid.Column="3" Text="100.0" HorizontalContentAlignment="Right" Margin="2" Height="22"/>
+                                            <TextBox x:Name="TxtCo2" Grid.Row="1" Grid.Column="3" Text="100.0" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
 
                                             <TextBlock Grid.Row="1" Grid.Column="4" Text="CO3(ppm):" VerticalAlignment="Center" Margin="6,4,2,4"/>
-                                            <TextBox x:Name="TxtCo3" Grid.Row="1" Grid.Column="5" Text="1000.0" HorizontalContentAlignment="Right" Margin="2" Height="22"/>
+                                            <TextBox x:Name="TxtCo3" Grid.Row="1" Grid.Column="5" Text="1000.0" HorizontalContentAlignment="Right" Margin="2" Height="22" TextChanged="OnAutoConfigTextChanged"/>
                                         </Grid>
                                     </StackPanel>
                                 </Border>

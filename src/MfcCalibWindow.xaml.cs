@@ -59,9 +59,9 @@ namespace Bo_Tron_Khi_CS
                 for (int ch = 1; ch <= 6; ch++)
                 {
                     GetFields(ch, out TextBox txtMin, out TextBox txtMax, out TextBox txtFac);
-                    minV[ch - 1] = double.Parse(txtMin.Text);
-                    maxV[ch - 1] = double.Parse(txtMax.Text);
-                    factors[ch - 1] = double.Parse(txtFac.Text);
+                    minV[ch - 1] = ParseUtil.ParseDouble(txtMin.Text);
+                    maxV[ch - 1] = ParseUtil.ParseDouble(txtMax.Text);
+                    factors[ch - 1] = ParseUtil.ParseDouble(txtFac.Text);
                 }
 
                 // Save to local configuration
