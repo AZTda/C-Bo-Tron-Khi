@@ -42,44 +42,48 @@ namespace Bo_Tron_Khi_CS
                 return;
             }
 
-            try
+            byte slave = (byte)_config.e5cc_slave;
+            int failCount = 0;
+
+            // 1. Read PID parameters (0x2300 - 0x2305) — batch read 6 regs
+            var pidResult = _handler.TryReadHoldingRegisters(slave, 0x2300, 6);
+            if (pidResult.Success && pidResult.Data != null && pidResult.Data.Length >= 6)
             {
-                byte slave = (byte)_config.e5cc_slave;
+                TxtP.Text = (pidResult.Data[0] / 10.0f).ToString("F1");
+                TxtI.Text = pidResult.Data[1].ToString();
+                TxtD.Text = (pidResult.Data[2] / 10.0f).ToString("F1");
+                TxtCtrlPeriod.Text = pidResult.Data[3].ToString();
+                TxtMvMax.Text = (pidResult.Data[4] / 10.0f).ToString("F1");
+                TxtMvMin.Text = (pidResult.Data[5] / 10.0f).ToString("F1");
+            }
+            else { failCount++; }
 
-                // 1. Read PID parameters (0x2300 - 0x2305)
-                ushort[] pidData = _handler.ReadHoldingRegisters(slave, 0x2300, 6);
-                if (pidData != null && pidData.Length >= 6)
-                {
-                    TxtP.Text = (pidData[0] / 10.0f).ToString("F1");
-                    TxtI.Text = pidData[1].ToString();
-                    TxtD.Text = (pidData[2] / 10.0f).ToString("F1");
-                    TxtCtrlPeriod.Text = pidData[3].ToString();
-                    TxtMvMax.Text = (pidData[4] / 10.0f).ToString("F1");
-                    TxtMvMin.Text = (pidData[5] / 10.0f).ToString("F1");
-                }
+            // 2. Read SP limits (0x2400 - 0x2402) — batch read 3 regs
+            var spResult = _handler.TryReadHoldingRegisters(slave, 0x2400, 3);
+            if (spResult.Success && spResult.Data != null && spResult.Data.Length >= 3)
+            {
+                TxtInputShift.Text = ((short)spResult.Data[0] / 10.0f).ToString("F1");
+                TxtSpMax.Text = ((short)spResult.Data[1] / 10.0f).ToString("F1");
+                TxtSpMin.Text = ((short)spResult.Data[2] / 10.0f).ToString("F1");
+            }
+            else { failCount++; }
 
-                // 2. Read SP limits (0x2400 - 0x2402)
-                ushort[] spLimits = _handler.ReadHoldingRegisters(slave, 0x2400, 3);
-                if (spLimits != null && spLimits.Length >= 3)
-                {
-                    TxtInputShift.Text = ((short)spLimits[0] / 10.0f).ToString("F1");
-                    TxtSpMax.Text = ((short)spLimits[1] / 10.0f).ToString("F1");
-                    TxtSpMin.Text = ((short)spLimits[2] / 10.0f).ToString("F1");
-                }
+            // 3. Read Alarm thresholds (0x2200 - 0x2201) — batch read 2 regs
+            var almResult = _handler.TryReadHoldingRegisters(slave, 0x2200, 2);
+            if (almResult.Success && almResult.Data != null && almResult.Data.Length >= 2)
+            {
+                TxtAlm1.Text = ((short)almResult.Data[0] / 10.0f).ToString("F1");
+                TxtAlm2.Text = ((short)almResult.Data[1] / 10.0f).ToString("F1");
+            }
+            else { failCount++; }
 
-                // 3. Read Alarm thresholds (0x2200 - 0x2202)
-                ushort[] alarms = _handler.ReadHoldingRegisters(slave, 0x2200, 2);
-                if (alarms != null && alarms.Length >= 2)
-                {
-                    TxtAlm1.Text = ((short)alarms[0] / 10.0f).ToString("F1");
-                    TxtAlm2.Text = ((short)alarms[1] / 10.0f).ToString("F1");
-                }
-
+            if (failCount == 0)
+            {
                 MessageBox.Show("Read parameters from Omron E5CC successfully!", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
             }
-            catch (Exception ex)
+            else
             {
-                MessageBox.Show($"Failed to read controller: {ex.Message}", "Modbus Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Partially read E5CC parameters. {failCount}/3 register groups failed.", "Partial Success", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
 
@@ -108,25 +112,36 @@ namespace Bo_Tron_Khi_CS
                 if (_handler.IsConnected)
                 {
                     byte slave = (byte)_config.e5cc_slave;
+                    int failCount = 0;
 
-                    // Write PID
-                    _handler.WriteSingleRegister(slave, 0x2300, (ushort)(p * 10));
-                    _handler.WriteSingleRegister(slave, 0x2301, i);
-                    _handler.WriteSingleRegister(slave, 0x2302, (ushort)(d * 10));
-                    _handler.WriteSingleRegister(slave, 0x2303, ctrlPeriod);
-                    _handler.WriteSingleRegister(slave, 0x2304, (ushort)(mvMax * 10));
-                    _handler.WriteSingleRegister(slave, 0x2305, (ushort)(mvMin * 10));
+                    // Write PID + MV limits as batch (6 consecutive regs: P, I, D, CtrlPeriod, MvHi, MvLo)
+                    ushort[] pidBatch = new ushort[] {
+                        (ushort)(p * 10), i, (ushort)(d * 10),
+                        ctrlPeriod, (ushort)(mvMax * 10), (ushort)(mvMin * 10)
+                    };
+                    var pidResult = _handler.TryWriteMultipleRegisters(slave, 0x2300, pidBatch);
+                    if (!pidResult.Success) failCount++;
 
-                    // Write Limits
-                    _handler.WriteSingleRegister(slave, 0x2400, (ushort)(offset * 10));
-                    _handler.WriteSingleRegister(slave, 0x2401, (ushort)(spMax * 10));
-                    _handler.WriteSingleRegister(slave, 0x2402, (ushort)(spMin * 10));
+                    // Write SP limits as batch (3 consecutive regs: InputShift, SpHi, SpLo)
+                    ushort[] spBatch = new ushort[] {
+                        (ushort)(offset * 10), (ushort)(spMax * 10), (ushort)(spMin * 10)
+                    };
+                    var spResult = _handler.TryWriteMultipleRegisters(slave, 0x2400, spBatch);
+                    if (!spResult.Success) failCount++;
 
-                    // Write Alarms
-                    _handler.WriteSingleRegister(slave, 0x2200, (ushort)(alm1 * 10));
-                    _handler.WriteSingleRegister(slave, 0x2201, (ushort)(alm2 * 10));
+                    // Write Alarm thresholds as batch (2 consecutive regs)
+                    ushort[] almBatch = new ushort[] { (ushort)(alm1 * 10), (ushort)(alm2 * 10) };
+                    var almResult = _handler.TryWriteMultipleRegisters(slave, 0x2200, almBatch);
+                    if (!almResult.Success) failCount++;
 
-                    MessageBox.Show("Saved settings locally and wrote successfully to Omron E5CC!", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+                    if (failCount == 0)
+                    {
+                        MessageBox.Show("Saved settings locally and wrote successfully to Omron E5CC!", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }
+                    else
+                    {
+                        MessageBox.Show($"Saved locally, but {failCount}/3 register group write(s) failed.", "Partial Success", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
                 }
                 else
                 {
@@ -147,15 +162,16 @@ namespace Bo_Tron_Khi_CS
                 MessageBox.Show("Modbus is not connected.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
-            try
+
+            byte slave = (byte)_config.e5cc_slave;
+            var result = _handler.TryWriteSingleRegister(slave, 0x0002, 1); // execute AT
+            if (result.Success)
             {
-                byte slave = (byte)_config.e5cc_slave;
-                _handler.WriteSingleRegister(slave, 0x0002, 1); // execute AT
                 MessageBox.Show("Auto-Tune execution command sent!", "Info", MessageBoxButton.OK, MessageBoxImage.Information);
             }
-            catch (Exception ex)
+            else
             {
-                MessageBox.Show($"Failed to start AT: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to start AT: {result.ErrorMessage}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -166,15 +182,16 @@ namespace Bo_Tron_Khi_CS
                 MessageBox.Show("Modbus is not connected.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
-            try
+
+            byte slave = (byte)_config.e5cc_slave;
+            var result = _handler.TryWriteSingleRegister(slave, 0x0002, 0); // cancel AT
+            if (result.Success)
             {
-                byte slave = (byte)_config.e5cc_slave;
-                _handler.WriteSingleRegister(slave, 0x0002, 0); // cancel AT
                 MessageBox.Show("Auto-Tune cancellation command sent!", "Info", MessageBoxButton.OK, MessageBoxImage.Information);
             }
-            catch (Exception ex)
+            else
             {
-                MessageBox.Show($"Failed to stop AT: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to stop AT: {result.ErrorMessage}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 

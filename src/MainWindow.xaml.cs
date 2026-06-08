@@ -1207,9 +1207,21 @@ namespace Bo_Tron_Khi_CS
                 }
 
                 bool simMode = e.Data.ErrorMessage == "Modbus connection closed." || _config.simulation_mode;
+                
+                // Show communication quality info
+                string qualityInfo = "";
+                if (e.Data.TotalRetries > 0)
+                {
+                    qualityInfo = $" [Retries: {e.Data.TotalRetries}]";
+                }
+                if (e.Data.FailedTransactions > 0)
+                {
+                    qualityInfo += $" [Failed: {e.Data.FailedTransactions}/5]";
+                }
+                
                 TxtStatusLeft.Text = simMode 
-                    ? "Polled successfully. Connection status: Virtual Sim (Connected)" 
-                    : $"Polled successfully. Connection status: Connected ({_config.port})";
+                    ? $"Polled successfully. Connection status: Virtual Sim (Connected){qualityInfo}" 
+                    : $"Polled successfully. Connection status: Connected ({_config.port}){qualityInfo}";
 
                 // Update E5CC Status bar controls
                 ushort e5status = e.Data.E5ccStatus;
@@ -1221,6 +1233,7 @@ namespace Bo_Tron_Khi_CS
                 Brush greenBrush = (Brush)new BrushConverter().ConvertFromString("#10B981");
                 Brush redBrush = (Brush)new BrushConverter().ConvertFromString("#EF4444");
                 Brush greyBrush = (Brush)new BrushConverter().ConvertFromString("#374151");
+                Brush yellowBrush = (Brush)new BrushConverter().ConvertFromString("#F59E0B");
 
                 // Overheat protection cutoff logic
                 if (almActive && _config.temp_auto_stop && _recipeEngine.IsRunning)
@@ -1277,9 +1290,24 @@ namespace Bo_Tron_Khi_CS
                     _logger.LogRow(e.Data, gas1, gas2, gas3);
                 }
 
-                // Update Bottom connection indicators
-                Brush connColor = simMode ? (Brush)new BrushConverter().ConvertFromString("#6366F1") : greenBrush;
-                string connTxt = simMode ? "Virtual Sim" : "Connected";
+                // Update Bottom connection indicators with quality coloring
+                Brush connColor;
+                string connTxt;
+                if (simMode)
+                {
+                    connColor = (Brush)new BrushConverter().ConvertFromString("#6366F1");
+                    connTxt = "Virtual Sim";
+                }
+                else if (e.Data.FailedTransactions > 0)
+                {
+                    connColor = yellowBrush; // degraded connection
+                    connTxt = "Degraded";
+                }
+                else
+                {
+                    connColor = greenBrush;
+                    connTxt = "Connected";
+                }
 
                 LblMixConnStatus.Text = $"● Mixing {connTxt}";
                 LblMixConnStatus.Foreground = connColor;
@@ -1295,7 +1323,7 @@ namespace Bo_Tron_Khi_CS
                 else if (atActive)
                 {
                     LblE5Status.Text = "● E5CC: AUTO-TUNE ACTIVE";
-                    LblE5Status.Foreground = (Brush)new BrushConverter().ConvertFromString("#F59E0B");
+                    LblE5Status.Foreground = yellowBrush;
                 }
                 else
                 {
@@ -1330,6 +1358,10 @@ namespace Bo_Tron_Khi_CS
             dlg.ShowDialog();
         }
 
+        /// <summary>
+        /// Write MFC flow for a single channel — atomic 3-register batch write.
+        /// Replaces old pattern of 2 separate Modbus calls.
+        /// </summary>
         private void WriteMfcFlow(int ch, double flow)
         {
             byte ms = (byte)_config.mixing_slave;
@@ -1340,9 +1372,10 @@ namespace Bo_Tron_Khi_CS
                 factor = _config.mfc_factor[chIdx];
             }
 
+            // Atomic: [SP_Hi, SP_Lo, DAC_EN] in ONE WriteMultiple
             var floatRegs = ModbusHandler.FloatToRegs((float)(flow * factor));
-            _handler.WriteMultipleRegisters(ms, (ushort)(60 + chIdx * 3), new ushort[] { floatRegs[0], floatRegs[1] });
-            _handler.WriteSingleRegister(ms, (ushort)(60 + chIdx * 3 + 2), (ushort)(flow > 0.1 ? 1 : 0));
+            ushort dacEn = (ushort)(flow > 0.1 ? 1 : 0);
+            _handler.TryWriteMultipleRegisters(ms, (ushort)(60 + chIdx * 3), new ushort[] { floatRegs[0], floatRegs[1], dacEn });
         }
 
         private void OnConnectModbusClick(object sender, RoutedEventArgs e)
@@ -1435,8 +1468,16 @@ namespace Bo_Tron_Khi_CS
                     registers[baseIdx + 7] = w4[1];
                 }
 
-                _handler.WriteMultipleRegisters(ms, 0, registers);
-                MessageBox.Show("Successfully synced all MFC ranges and calibration (Holding Regs 0-47) to device.", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+                var result = _handler.TryWriteMultipleRegisters(ms, 0, registers);
+                if (result.Success)
+                {
+                    string retryInfo = result.RetryCount > 0 ? $" (retried {result.RetryCount}x)" : "";
+                    MessageBox.Show($"Successfully synced all MFC ranges and calibration (Holding Regs 0-47) to device.{retryInfo}", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    MessageBox.Show($"Sync failed: {result.ErrorMessage}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
             }
             catch (Exception ex)
             {
@@ -1660,14 +1701,11 @@ namespace Bo_Tron_Khi_CS
             _logger.StartNewLog();
             
             // RUN temperature controller
-            try
+            byte es = (byte)_config.e5cc_slave;
+            var result = _handler.TryWriteSingleRegister(es, 0x0000, 0); // E5CC RUN
+            if (!result.Success)
             {
-                byte es = (byte)_config.e5cc_slave;
-                _handler.WriteSingleRegister(es, 0x0000, 0); // E5CC RUN
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error in StartManualMode RUN: {ex.Message}");
+                Console.WriteLine($"Warning: E5CC RUN command failed: {result.ErrorMessage}");
             }
 
             ApplyManualFlows();
@@ -1691,22 +1729,14 @@ namespace Bo_Tron_Khi_CS
             _logger.StopLog();
 
             // Set all flows to 0 and E5CC to Stop
-            try
-            {
-                byte ms = (byte)_config.mixing_slave;
-                byte es = (byte)_config.e5cc_slave;
+            byte ms = (byte)_config.mixing_slave;
+            byte es = (byte)_config.e5cc_slave;
 
-                _handler.WriteSingleRegister(es, 0x0000, 1); // Stop E5CC
+            _handler.TryWriteSingleRegister(es, 0x0000, 1); // Stop E5CC
 
-                for (int ch = 1; ch <= 6; ch++)
-                {
-                    WriteMfcFlow(ch, 0.0);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error in StopManualMode: {ex.Message}");
-            }
+            // Batch zero all MFC flows in one transaction
+            ushort[] zeroRegs = new ushort[18]; // all zeros: SP=0, DAC_EN=0 for all 6 channels
+            _handler.TryWriteMultipleRegisters(ms, 60, zeroRegs);
         }
 
         private void OnManualTimerTick(object sender, EventArgs e)
@@ -1726,78 +1756,81 @@ namespace Bo_Tron_Khi_CS
 
         private void ApplyManualFlows()
         {
-            try
+            byte ms = (byte)_config.mixing_slave;
+            byte es = (byte)_config.e5cc_slave;
+
+            string ctrlType = (CbCtrlType.SelectedItem as ComboBoxItem)?.Content.ToString() ?? "Concentration";
+            
+            double temp = ParseUtil.ParseDouble(TxtManualTemp.Text, 25.0);
+            
+            // Write temp SP + RUN in 2 calls (non-consecutive E5CC registers)
+            _handler.TryWriteSingleRegister(es, 0x2100, (ushort)(temp * 10));
+            _handler.TryWriteSingleRegister(es, 0x0000, 0); // RUN
+
+            double g1 = ParseUtil.ParseDouble(TxtManualGas1.Text, 0.0);
+            double g2 = ParseUtil.ParseDouble(TxtManualGas2.Text, 0.0);
+            double g3 = ParseUtil.ParseDouble(TxtManualGas3.Text, 0.0);
+
+            if (ctrlType.Contains("Concentration"))
             {
-                byte ms = (byte)_config.mixing_slave;
-                byte es = (byte)_config.e5cc_slave;
+                double tot = _config.total_flow;
 
-                string ctrlType = (CbCtrlType.SelectedItem as ComboBoxItem)?.Content.ToString() ?? "Concentration";
-                
-                double temp = ParseUtil.ParseDouble(TxtManualTemp.Text, 25.0);
-                
-                // Write temp SP
-                _handler.WriteSingleRegister(es, 0x2100, (ushort)(temp * 10));
-                _handler.WriteSingleRegister(es, 0x0000, 0); // RUN
+                // Replicate Python's max gas range calculations and clipping
+                double max_g1 = (tot > 0) ? (Math.Max(_config.mfc_max_sccm[2], _config.mfc_max_sccm[3]) / tot) * _config.co1 : 0;
+                double max_g2 = (tot > 0) ? (_config.mfc_max_sccm[4] / tot) * _config.co2 : 0;
+                double max_g3 = (tot > 0) ? (_config.mfc_max_sccm[5] / tot) * _config.co3 : 0;
 
-                double g1 = ParseUtil.ParseDouble(TxtManualGas1.Text, 0.0);
-                double g2 = ParseUtil.ParseDouble(TxtManualGas2.Text, 0.0);
-                double g3 = ParseUtil.ParseDouble(TxtManualGas3.Text, 0.0);
+                g1 = Math.Min(g1, max_g1);
+                g2 = Math.Min(g2, max_g2);
+                g3 = Math.Min(g3, max_g3);
 
-                if (ctrlType.Contains("Concentration"))
+                TxtManualGas1.Text = g1.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                TxtManualGas2.Text = g2.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                TxtManualGas3.Text = g3.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+
+                double q1 = (_config.co1 > 0) ? (g1 / _config.co1) * tot : 0;
+                double qmfc3 = (q1 <= 100) ? q1 : 0;
+                double qmfc4 = (q1 <= 100) ? 0 : q1;
+                double qmfc5 = (_config.co2 > 0) ? (g2 / _config.co2) * tot : 0;
+                double qmfc6 = (_config.co3 > 0) ? (g3 / _config.co3) * tot : 0;
+
+                double qmfc2 = Math.Max(0.0, tot - qmfc3 - qmfc4 - qmfc5 - qmfc6);
+
+                // Batch write all 6 MFC flows in one transaction (18 registers)
+                double[] flows = new double[] { tot, qmfc2, qmfc3, qmfc4, qmfc5, qmfc6 };
+                ushort[] batch = new ushort[18];
+                for (int i = 0; i < 6; i++)
                 {
-                    double tot = _config.total_flow;
+                    double flow = flows[i];
+                    double factor = 1.0;
+                    if (_config.mfc_factor != null && _config.mfc_factor.Count > i)
+                        factor = _config.mfc_factor[i];
 
-                    // Replicate Python's max gas range calculations and clipping
-                    double max_g1 = (tot > 0) ? (Math.Max(_config.mfc_max_sccm[2], _config.mfc_max_sccm[3]) / tot) * _config.co1 : 0;
-                    double max_g2 = (tot > 0) ? (_config.mfc_max_sccm[4] / tot) * _config.co2 : 0;
-                    double max_g3 = (tot > 0) ? (_config.mfc_max_sccm[5] / tot) * _config.co3 : 0;
-
-                    g1 = Math.Min(g1, max_g1);
-                    g2 = Math.Min(g2, max_g2);
-                    g3 = Math.Min(g3, max_g3);
-
-                    TxtManualGas1.Text = g1.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
-                    TxtManualGas2.Text = g2.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
-                    TxtManualGas3.Text = g3.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
-
-                    double q1 = (_config.co1 > 0) ? (g1 / _config.co1) * tot : 0;
-                    double qmfc3 = (q1 <= 100) ? q1 : 0;
-                    double qmfc4 = (q1 <= 100) ? 0 : q1;
-                    double qmfc5 = (_config.co2 > 0) ? (g2 / _config.co2) * tot : 0;
-                    double qmfc6 = (_config.co3 > 0) ? (g3 / _config.co3) * tot : 0;
-
-                    double qmfc2 = Math.Max(0.0, tot - qmfc3 - qmfc4 - qmfc5 - qmfc6);
-
-                    WriteMfcFlow(1, tot); // Carrier
-                    WriteMfcFlow(2, qmfc2); // Diluent
-                    WriteMfcFlow(3, qmfc3);
-                    WriteMfcFlow(4, qmfc4);
-                    WriteMfcFlow(5, qmfc5);
-                    WriteMfcFlow(6, qmfc6);
+                    var floatRegs = ModbusHandler.FloatToRegs((float)(flow * factor));
+                    batch[i * 3] = floatRegs[0];
+                    batch[i * 3 + 1] = floatRegs[1];
+                    batch[i * 3 + 2] = (ushort)(flow > 0.1 ? 1 : 0);
                 }
-                else
-                {
-                    // Flow mode
-                    double max_q1 = Math.Max(_config.mfc_max_sccm[2], _config.mfc_max_sccm[3]);
-                    double max_q2 = _config.mfc_max_sccm[4];
-                    double max_q3 = _config.mfc_max_sccm[5];
-
-                    g1 = Math.Min(g1, max_q1);
-                    g2 = Math.Min(g2, max_q2);
-                    g3 = Math.Min(g3, max_q3);
-
-                    TxtManualGas1.Text = g1.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
-                    TxtManualGas2.Text = g2.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
-                    TxtManualGas3.Text = g3.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
-
-                    WriteMfcFlow(1, g1); // Carrier mapped to gas1 input
-                    WriteMfcFlow(2, g2); // Diluent mapped to gas2
-                    WriteMfcFlow(3, g3); // Gas3 etc.
-                }
+                _handler.TryWriteMultipleRegisters(ms, 60, batch);
             }
-            catch (Exception ex)
+            else
             {
-                Console.WriteLine($"Error in ApplyManualFlows: {ex.Message}");
+                // Flow mode
+                double max_q1 = Math.Max(_config.mfc_max_sccm[2], _config.mfc_max_sccm[3]);
+                double max_q2 = _config.mfc_max_sccm[4];
+                double max_q3 = _config.mfc_max_sccm[5];
+
+                g1 = Math.Min(g1, max_q1);
+                g2 = Math.Min(g2, max_q2);
+                g3 = Math.Min(g3, max_q3);
+
+                TxtManualGas1.Text = g1.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                TxtManualGas2.Text = g2.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                TxtManualGas3.Text = g3.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+
+                WriteMfcFlow(1, g1); // Carrier mapped to gas1 input
+                WriteMfcFlow(2, g2); // Diluent mapped to gas2
+                WriteMfcFlow(3, g3); // Gas3 etc.
             }
         }
 
@@ -1853,24 +1886,31 @@ namespace Bo_Tron_Khi_CS
             _logger.StopLog();
             _recipeEngine.Stop();
 
-            try
-            {
-                byte ms = (byte)_config.mixing_slave;
-                // Close 3-way valve (Relay 1 = 0)
-                _handler.WriteSingleRegister(ms, 20, 0);
+            byte ms = (byte)_config.mixing_slave;
+            
+            // Use TryWrite for resilience — don't throw on failure, try everything
+            // Close 3-way valve (Relay 1 = 0)
+            var valveResult = _handler.TryWriteSingleRegister(ms, 20, 0);
 
-                // Set MFC flows to 0
+            // Set all MFC flows to 0 in one batch
+            ushort[] zeroRegs = new ushort[18];
+            // All zeros: SP=0, DAC_EN=0 for all 6 channels
+            var flowResult = _handler.TryWriteMultipleRegisters(ms, 60, zeroRegs);
+
+            if (!valveResult.Success || !flowResult.Success)
+            {
+                // Some writes failed — try individual writes as fallback
                 for (int ch = 1; ch <= 6; ch++)
                 {
-                    WriteMfcFlow(ch, 0.0);
+                    try { WriteMfcFlow(ch, 0.0); } catch { }
                 }
-                MessageBox.Show("🚨 EMERGENCY VALVE SHUTDOWN COMPLETED! ALL FLOWS CLOSED.", "EMERGENCY SHUTDOWN", MessageBoxButton.OK, MessageBoxImage.Stop);
-                LblStatusState.Text = "Status: Emergency Stop";
+                MessageBox.Show($"🚨 EMERGENCY SHUTDOWN — some commands may have failed!\nValve: {(valveResult.Success ? "OK" : valveResult.ErrorMessage)}\nFlows: {(flowResult.Success ? "OK" : flowResult.ErrorMessage)}", "EMERGENCY SHUTDOWN", MessageBoxButton.OK, MessageBoxImage.Stop);
             }
-            catch (Exception ex)
+            else
             {
-                MessageBox.Show($"Emergency shutdown write failure: {ex.Message}", "Emergency Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show("🚨 EMERGENCY VALVE SHUTDOWN COMPLETED! ALL FLOWS CLOSED.", "EMERGENCY SHUTDOWN", MessageBoxButton.OK, MessageBoxImage.Stop);
             }
+            LblStatusState.Text = "Status: Emergency Stop";
         }
 
         private void OnManualValveClick(object sender, RoutedEventArgs e)
@@ -1886,14 +1926,13 @@ namespace Bo_Tron_Khi_CS
             BtnManualValve.Background = _valveRelay1 ? (Brush)new BrushConverter().ConvertFromString("#10B981") : (Brush)new BrushConverter().ConvertFromString("#1F2937");
             BtnManualValve.Foreground = _valveRelay1 ? Brushes.White : (Brush)new BrushConverter().ConvertFromString("#F9FAFB");
 
-            try
+            byte ms = (byte)_config.mixing_slave;
+            var result = _handler.TryWriteSingleRegister(ms, 20, (ushort)(_valveRelay1 ? 1 : 0));
+            if (!result.Success)
             {
-                byte ms = (byte)_config.mixing_slave;
-                _handler.WriteSingleRegister(ms, 20, (ushort)(_valveRelay1 ? 1 : 0));
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Failed to toggle valve: {ex.Message}", "Modbus Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                _valveRelay1 = !_valveRelay1; // revert UI state
+                BtnManualValve.Content = _valveRelay1 ? "Valve:On" : "Valve:Off";
+                MessageBox.Show($"Failed to toggle valve: {result.ErrorMessage}", "Modbus Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -1910,14 +1949,13 @@ namespace Bo_Tron_Khi_CS
             BtnManualPump.Background = _valveRelay2 ? (Brush)new BrushConverter().ConvertFromString("#10B981") : (Brush)new BrushConverter().ConvertFromString("#1F2937");
             BtnManualPump.Foreground = _valveRelay2 ? Brushes.White : (Brush)new BrushConverter().ConvertFromString("#F9FAFB");
 
-            try
+            byte ms = (byte)_config.mixing_slave;
+            var result = _handler.TryWriteSingleRegister(ms, 21, (ushort)(_valveRelay2 ? 1 : 0));
+            if (!result.Success)
             {
-                byte ms = (byte)_config.mixing_slave;
-                _handler.WriteSingleRegister(ms, 21, (ushort)(_valveRelay2 ? 1 : 0));
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Failed to toggle pump: {ex.Message}", "Modbus Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                _valveRelay2 = !_valveRelay2; // revert UI state
+                BtnManualPump.Content = _valveRelay2 ? "Pump:On" : "Pump:Off";
+                MessageBox.Show($"Failed to toggle pump: {result.ErrorMessage}", "Modbus Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 

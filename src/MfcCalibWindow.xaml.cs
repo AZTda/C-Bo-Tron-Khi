@@ -77,20 +77,30 @@ namespace Bo_Tron_Khi_CS
                 if (_handler.IsConnected)
                 {
                     byte ms = (byte)_config.mixing_slave;
+                    int failCount = 0;
+
                     for (int ch = 0; ch < 6; ch++)
                     {
                         float minVolt = (float)(_config.mfc_min_v[ch] / 1000.0);
                         float maxVolt = (float)(_config.mfc_max_v[ch] / 1000.0);
 
-                        // Write min_v to register ch * 8 + 4
+                        // Write min_v and max_v as a single batch (4 regs) instead of 2 separate calls
                         ushort[] minVoltRegs = ModbusHandler.FloatToRegs(minVolt);
-                        _handler.WriteMultipleRegisters(ms, (ushort)(ch * 8 + 4), minVoltRegs);
-
-                        // Write max_v to register ch * 8 + 6
                         ushort[] maxVoltRegs = ModbusHandler.FloatToRegs(maxVolt);
-                        _handler.WriteMultipleRegisters(ms, (ushort)(ch * 8 + 6), maxVoltRegs);
+                        ushort[] batch = new ushort[] { minVoltRegs[0], minVoltRegs[1], maxVoltRegs[0], maxVoltRegs[1] };
+
+                        var result = _handler.TryWriteMultipleRegisters(ms, (ushort)(ch * 8 + 4), batch);
+                        if (!result.Success) failCount++;
                     }
-                    MessageBox.Show("MFC voltage calibration & factor configuration saved.", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+
+                    if (failCount > 0)
+                    {
+                        MessageBox.Show($"MFC calibration saved locally. Warning: {failCount} channel(s) failed to sync to device.", "Partial Success", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+                    else
+                    {
+                        MessageBox.Show("MFC voltage calibration & factor configuration saved.", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }
                 }
                 else
                 {

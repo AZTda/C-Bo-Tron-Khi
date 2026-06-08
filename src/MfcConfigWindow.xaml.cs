@@ -49,33 +49,31 @@ namespace Bo_Tron_Khi_CS
                 return;
             }
 
-            try
+            // Read 48 registers from address 0 using new TryRead API
+            var result = _handler.TryReadHoldingRegisters((byte)_config.mixing_slave, 0, 48);
+            if (result.Success && result.Data != null && result.Data.Length == 48)
             {
-                byte slave = (byte)_config.mixing_slave;
-                // Read 48 registers from address 0
-                ushort[] regs = _handler.ReadHoldingRegisters(slave, 0, 48);
-                if (regs != null && regs.Length == 48)
+                for (int ch = 1; ch <= 6; ch++)
                 {
-                    for (int ch = 1; ch <= 6; ch++)
-                    {
-                        int baseIdx = (ch - 1) * 8;
-                        float minSccm = ModbusHandler.RegsToFloat(regs[baseIdx], regs[baseIdx + 1]);
-                        float maxSccm = ModbusHandler.RegsToFloat(regs[baseIdx + 2], regs[baseIdx + 3]);
-                        float minVolt = ModbusHandler.RegsToFloat(regs[baseIdx + 4], regs[baseIdx + 5]);
-                        float maxVolt = ModbusHandler.RegsToFloat(regs[baseIdx + 6], regs[baseIdx + 7]);
+                    int baseIdx = (ch - 1) * 8;
+                    float minSccm = ModbusHandler.RegsToFloat(result.Data[baseIdx], result.Data[baseIdx + 1]);
+                    float maxSccm = ModbusHandler.RegsToFloat(result.Data[baseIdx + 2], result.Data[baseIdx + 3]);
+                    float minVolt = ModbusHandler.RegsToFloat(result.Data[baseIdx + 4], result.Data[baseIdx + 5]);
+                    float maxVolt = ModbusHandler.RegsToFloat(result.Data[baseIdx + 6], result.Data[baseIdx + 7]);
 
-                        GetFields(ch, out TextBox minS, out TextBox maxS, out TextBox minV, out TextBox maxV);
-                        minS.Text = minSccm.ToString("F1");
-                        maxS.Text = maxSccm.ToString("F1");
-                        minV.Text = minVolt.ToString("F3");
-                        maxV.Text = maxVolt.ToString("F3");
-                    }
-                    MessageBox.Show("Read settings from device successfully!", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+                    GetFields(ch, out TextBox minS, out TextBox maxS, out TextBox minV, out TextBox maxV);
+                    minS.Text = minSccm.ToString("F1");
+                    maxS.Text = maxSccm.ToString("F1");
+                    minV.Text = minVolt.ToString("F3");
+                    maxV.Text = maxVolt.ToString("F3");
                 }
+
+                string retryInfo = result.RetryCount > 0 ? $" (retried {result.RetryCount}x)" : "";
+                MessageBox.Show($"Read settings from device successfully!{retryInfo}", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
             }
-            catch (Exception ex)
+            else
             {
-                MessageBox.Show($"Failed to read device: {ex.Message}", "Modbus Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to read device: {result.ErrorMessage}", "Modbus Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -123,8 +121,16 @@ namespace Bo_Tron_Khi_CS
                 if (_handler.IsConnected)
                 {
                     byte slave = (byte)_config.mixing_slave;
-                    _handler.WriteMultipleRegisters(slave, 0, registers);
-                    MessageBox.Show("Saved settings locally and wrote successfully to Mixing Board!", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+                    var result = _handler.TryWriteMultipleRegisters(slave, 0, registers);
+                    if (result.Success)
+                    {
+                        string retryInfo = result.RetryCount > 0 ? $" (retried {result.RetryCount}x)" : "";
+                        MessageBox.Show($"Saved settings locally and wrote successfully to Mixing Board!{retryInfo}", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }
+                    else
+                    {
+                        MessageBox.Show($"Saved locally, but failed to write to device: {result.ErrorMessage}", "Partial Success", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
                 }
                 else
                 {

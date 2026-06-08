@@ -59,23 +59,36 @@ namespace Bo_Tron_Khi_CS
                 if (_handler.IsConnected)
                 {
                     byte ms = (byte)_config.mixing_slave;
+                    int failCount = 0;
+
                     for (int ch = 0; ch < 6; ch++)
                     {
                         float maxSccm = (float)_config.mfc_max_sccm[ch];
                         
-                        // Write SP = 0 sccm
+                        // Write SP = 0 sccm + DAC_EN = 0 (atomic 3-reg batch)
                         ushort[] zeroRegs = ModbusHandler.FloatToRegs(0.0f);
-                        _handler.WriteMultipleRegisters(ms, (ushort)(60 + ch * 3), zeroRegs);
+                        var spResult = _handler.TryWriteMultipleRegisters(ms, (ushort)(60 + ch * 3), new ushort[] { zeroRegs[0], zeroRegs[1], 0 });
+                        if (!spResult.Success) failCount++;
 
                         // Write min_sccm = 0
                         ushort[] minSccmRegs = ModbusHandler.FloatToRegs(0.0f);
-                        _handler.WriteMultipleRegisters(ms, (ushort)(ch * 8), minSccmRegs);
+                        var minResult = _handler.TryWriteMultipleRegisters(ms, (ushort)(ch * 8), minSccmRegs);
+                        if (!minResult.Success) failCount++;
 
                         // Write max_sccm = maxSccm
                         ushort[] maxSccmRegs = ModbusHandler.FloatToRegs(maxSccm);
-                        _handler.WriteMultipleRegisters(ms, (ushort)(ch * 8 + 2), maxSccmRegs);
+                        var maxResult = _handler.TryWriteMultipleRegisters(ms, (ushort)(ch * 8 + 2), maxSccmRegs);
+                        if (!maxResult.Success) failCount++;
                     }
-                    MessageBox.Show("MFC flow ranges updated and synced to device.", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+
+                    if (failCount > 0)
+                    {
+                        MessageBox.Show($"MFC flow ranges saved locally. Warning: {failCount} write(s) failed during device sync.", "Partial Success", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+                    else
+                    {
+                        MessageBox.Show("MFC flow ranges updated and synced to device.", "Success", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }
                 }
                 else
                 {

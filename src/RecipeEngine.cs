@@ -76,7 +76,11 @@ namespace Bo_Tron_Khi_CS
             SafeShutdownFlows();
         }
 
-        private void WriteMfcFlow(byte ms, int ch, double flow)
+        // ===================================================
+        // ATOMIC MFC WRITE — single WriteMultiple for SP + DAC_EN
+        // Replaces old pattern of 2 separate calls per channel
+        // ===================================================
+        private void WriteMfcFlow(byte ms, int ch, double flow, CancellationToken ct)
         {
             int chIdx = ch - 1; // 1-indexed to 0-indexed
             double factor = 1.0;
@@ -85,11 +89,91 @@ namespace Bo_Tron_Khi_CS
                 factor = _config.mfc_factor[chIdx];
             }
 
+            // Batch: [SP_Hi, SP_Lo, DAC_EN] = 3 registers in ONE transaction
             var floatRegs = ModbusHandler.FloatToRegs((float)(flow * factor));
-            _handler.WriteMultipleRegisters(ms, (ushort)(60 + chIdx * 3), new ushort[] { floatRegs[0], floatRegs[1] });
-            _handler.WriteSingleRegister(ms, (ushort)(60 + chIdx * 3 + 2), (ushort)(flow > 0.1 ? 1 : 0));
+            ushort dacEn = (ushort)(flow > 0.1 ? 1 : 0);
+            ushort[] batch = new ushort[] { floatRegs[0], floatRegs[1], dacEn };
+
+            var result = _handler.TryWriteMultipleRegisters(ms, (ushort)(60 + chIdx * 3), batch, ct);
+            if (!result.Success)
+            {
+                Console.WriteLine($"WriteMfcFlow CH{ch} failed: {result.ErrorMessage}");
+            }
         }
 
+        // Legacy overload without CancellationToken (for SafeShutdownFlows)
+        private void WriteMfcFlow(byte ms, int ch, double flow)
+        {
+            WriteMfcFlow(ms, ch, flow, CancellationToken.None);
+        }
+
+        // ===================================================
+        // BATCH WRITE ALL 6 MFCs — 18 registers in ONE transaction
+        // ===================================================
+        private void BatchWriteAllMfcFlows(byte ms, double[] flows, CancellationToken ct)
+        {
+            // Build 18-register batch: [SP_Hi, SP_Lo, DAC_EN] × 6 channels
+            ushort[] batch = new ushort[18];
+            for (int i = 0; i < 6; i++)
+            {
+                double flow = flows[i];
+                double factor = 1.0;
+                if (_config.mfc_factor != null && _config.mfc_factor.Count > i)
+                {
+                    factor = _config.mfc_factor[i];
+                }
+
+                var floatRegs = ModbusHandler.FloatToRegs((float)(flow * factor));
+                batch[i * 3] = floatRegs[0];
+                batch[i * 3 + 1] = floatRegs[1];
+                batch[i * 3 + 2] = (ushort)(flow > 0.1 ? 1 : 0);
+            }
+
+            var result = _handler.TryWriteMultipleRegisters(ms, 60, batch, ct);
+            if (!result.Success)
+            {
+                Console.WriteLine($"BatchWriteAllMfcFlows failed: {result.ErrorMessage}");
+                // Fallback: try individual writes
+                for (int ch = 1; ch <= 6; ch++)
+                {
+                    WriteMfcFlow(ms, ch, flows[ch - 1], ct);
+                }
+            }
+        }
+
+        // ===================================================
+        // WRITE WITH VERIFY — write then read-back to confirm
+        // Used for critical relay operations
+        // ===================================================
+        private bool WriteAndVerifyRelay(byte ms, ushort regAddr, ushort value, CancellationToken ct, int maxAttempts = 3)
+        {
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var writeResult = _handler.TryWriteSingleRegister(ms, regAddr, value, ct);
+                if (!writeResult.Success) continue;
+
+                // Read back to verify
+                var readResult = _handler.TryReadHoldingRegisters(ms, regAddr, 1, ct);
+                if (readResult.Success && readResult.Data != null && readResult.Data.Length >= 1)
+                {
+                    if (readResult.Data[0] == value)
+                        return true; // Verified!
+                }
+
+                // Mismatch or read failed — retry
+                Console.WriteLine($"WriteAndVerify reg {regAddr}: attempt {attempt + 1} verify failed, retrying...");
+                Thread.Sleep(50);
+            }
+
+            Console.WriteLine($"WriteAndVerify reg {regAddr}: FAILED after {maxAttempts} attempts");
+            return false;
+        }
+
+        // ===================================================
+        // RECIPE SEQUENCE — passes CancellationToken throughout
+        // ===================================================
         private async Task RunSequence(List<RecipeStep> steps, CancellationToken token)
         {
             byte ms = (byte)_config.mixing_slave;
@@ -111,15 +195,13 @@ namespace Bo_Tron_Khi_CS
                     // --- PURGE PART ---
                     if (purgeTime > 0)
                     {
-                        // Valve OFF (MFC1 Carrier -> Chamber, others -> Exhaust)
-                        _handler.WriteSingleRegister(ms, 20, 0); 
-                        _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
+                        // Valve OFF + Pump ON (with verify for relays)
+                        WriteAndVerifyRelay(ms, 20, 0, token);
+                        WriteAndVerifyRelay(ms, 21, 1, token);
                         
-                        WriteMfcFlow(ms, 1, _config.total_flow);
-                        for (int ch = 2; ch <= 6; ch++)
-                        {
-                            WriteMfcFlow(ms, ch, 0.0);
-                        }
+                        // All MFCs in one batch: Carrier = total, rest = 0
+                        double[] purgeFlows = new double[] { _config.total_flow, 0, 0, 0, 0, 0 };
+                        BatchWriteAllMfcFlows(ms, purgeFlows, token);
 
                         double elapsed = 0;
                         while (elapsed < purgeTime)
@@ -135,8 +217,8 @@ namespace Bo_Tron_Khi_CS
                     // --- PRE-MIX PART ---
                     if (premixTime > 0 && steps.Count > 0)
                     {
-                        ApplyStepFlows(steps[0], ms, es);
-                        _handler.WriteSingleRegister(ms, 20, 0); // Ensure valve remains OFF
+                        ApplyStepFlows(steps[0], ms, es, token);
+                        _handler.TryWriteSingleRegister(ms, 20, 0, token); // Ensure valve remains OFF
 
                         double elapsed = 0;
                         while (elapsed < premixTime)
@@ -162,19 +244,16 @@ namespace Bo_Tron_Khi_CS
 
                     // Write target temperature and RUN E5CC
                     ushort tempReg = (ushort)(step.Temp * 10);
-                    _handler.WriteSingleRegister(es, 0x2100, tempReg);
-                    _handler.WriteSingleRegister(es, 0x0000, 0); // RUN
+                    _handler.TryWriteSingleRegister(es, 0x2100, tempReg, token);
+                    _handler.TryWriteSingleRegister(es, 0x0000, 0, token); // RUN
                     
-                    // Keep Valve OFF during stabilization (flush chamber with carrier)
-                    _handler.WriteSingleRegister(ms, 20, 0); 
-                    _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
+                    // Keep Valve OFF during stabilization + Pump ON (verified)
+                    WriteAndVerifyRelay(ms, 20, 0, token);
+                    WriteAndVerifyRelay(ms, 21, 1, token);
                     
-                    // Purging: MFC1 (Carrier) = Total Flow, all others = 0
-                    WriteMfcFlow(ms, 1, _config.total_flow);
-                    for (int ch = 2; ch <= 6; ch++)
-                    {
-                        WriteMfcFlow(ms, ch, 0.0);
-                    }
+                    // Purging: all MFCs in one batch
+                    double[] stabFlows = new double[] { _config.total_flow, 0, 0, 0, 0, 0 };
+                    BatchWriteAllMfcFlows(ms, stabFlows, token);
 
                     double currentTemp = 25.0;
                     DateTime stabilizationStart = DateTime.Now;
@@ -184,17 +263,10 @@ namespace Bo_Tron_Khi_CS
                     {
                         token.ThrowIfCancellationRequested();
 
-                        try
+                        var regsResult = _handler.TryReadHoldingRegisters(es, 0x2000, 1, token);
+                        if (regsResult.Success && regsResult.Data != null && regsResult.Data.Length > 0)
                         {
-                            var regs = _handler.ReadHoldingRegisters(es, 0x2000, 1);
-                            if (regs != null && regs.Length > 0)
-                            {
-                                currentTemp = regs[0] / 10.0;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Error reading temperature in stabilization: {ex.Message}");
+                            currentTemp = regsResult.Data[0] / 10.0;
                         }
 
                         if (Math.Abs(currentTemp - step.Temp) <= 1.5)
@@ -217,10 +289,10 @@ namespace Bo_Tron_Khi_CS
                     // --- EXPOSURE PHASE ---
                     CurrentState = RecipeState.Exposure;
                     
-                    // Apply target setpoints and turn Valve ON (Relay 1 = 1)
-                    ApplyStepFlows(step, ms, es);
-                    _handler.WriteSingleRegister(ms, 20, 1); // Valve ON (MFC2-6 -> Chamber)
-                    _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
+                    // Apply target setpoints (batch) and Valve ON (verified)
+                    ApplyStepFlows(step, ms, es, token);
+                    WriteAndVerifyRelay(ms, 20, 1, token); // Valve ON
+                    WriteAndVerifyRelay(ms, 21, 1, token); // Pump ON
 
                     double expTime = step.ExposureTime;
                     double expElapsed = 0;
@@ -246,15 +318,11 @@ namespace Bo_Tron_Khi_CS
                     // --- RECOVERY PURGE ---
                     if (recPurgeTime > 0)
                     {
-                        // Valve OFF (MFC1 Carrier -> Chamber, MFC2-6 -> Exhaust)
-                        _handler.WriteSingleRegister(ms, 20, 0); 
-                        _handler.WriteSingleRegister(ms, 21, 1); // Pump ON
+                        WriteAndVerifyRelay(ms, 20, 0, token); // Valve OFF
+                        WriteAndVerifyRelay(ms, 21, 1, token); // Pump ON
                         
-                        WriteMfcFlow(ms, 1, _config.total_flow);
-                        for (int ch = 2; ch <= 6; ch++)
-                        {
-                            WriteMfcFlow(ms, ch, 0.0);
-                        }
+                        double[] recPurgeFlows = new double[] { _config.total_flow, 0, 0, 0, 0, 0 };
+                        BatchWriteAllMfcFlows(ms, recPurgeFlows, token);
 
                         double elapsed = 0;
                         while (elapsed < recPurgeTime)
@@ -270,8 +338,8 @@ namespace Bo_Tron_Khi_CS
                     // --- RECOVERY PRE-MIX ---
                     if (recPremixTime > 0 && hasNext)
                     {
-                        ApplyStepFlows(steps[stepIdx + 1], ms, es);
-                        _handler.WriteSingleRegister(ms, 20, 0); // Ensure valve remains OFF
+                        ApplyStepFlows(steps[stepIdx + 1], ms, es, token);
+                        _handler.TryWriteSingleRegister(ms, 20, 0, token); // Ensure valve remains OFF
 
                         double elapsed = 0;
                         while (elapsed < recPremixTime)
@@ -302,7 +370,10 @@ namespace Bo_Tron_Khi_CS
             }
         }
 
-        private void ApplyStepFlows(RecipeStep step, byte ms, byte es)
+        // ===================================================
+        // APPLY STEP FLOWS — uses batch write for all 6 MFCs
+        // ===================================================
+        private void ApplyStepFlows(RecipeStep step, byte ms, byte es, CancellationToken ct)
         {
             double tot = _config.total_flow;
             double co1 = _config.co1;
@@ -320,16 +391,12 @@ namespace Bo_Tron_Khi_CS
 
             // Set temperature setpoint to E5CC
             ushort tempReg = (ushort)(step.Temp * 10);
-            _handler.WriteSingleRegister(es, 0x2100, tempReg);
-            _handler.WriteSingleRegister(es, 0x0000, 0); // Ensure E5CC is in RUN mode (write 0x0000)
+            _handler.TryWriteSingleRegister(es, 0x2100, tempReg, ct);
+            _handler.TryWriteSingleRegister(es, 0x0000, 0, ct); // Ensure E5CC is in RUN mode
 
-            // Write MFC setpoints and enable DACs
-            WriteMfcFlow(ms, 1, tot); // MFC1 Carrier
-            WriteMfcFlow(ms, 2, qmfc2); // MFC2 Diluent
-            WriteMfcFlow(ms, 3, qmfc3); // MFC3 Gas 1 Low
-            WriteMfcFlow(ms, 4, qmfc4); // MFC4 Gas 1 High
-            WriteMfcFlow(ms, 5, qmfc5); // MFC5 Gas 2
-            WriteMfcFlow(ms, 6, qmfc6); // MFC6 Gas 3
+            // Write all 6 MFC setpoints in ONE batch (18 registers)
+            double[] flows = new double[] { tot, qmfc2, qmfc3, qmfc4, qmfc5, qmfc6 };
+            BatchWriteAllMfcFlows(ms, flows, ct);
         }
 
         private void SafeShutdownFlows()
@@ -337,14 +404,12 @@ namespace Bo_Tron_Khi_CS
             try
             {
                 byte ms = (byte)_config.mixing_slave;
-                // Close Valve (Relay 1 = 0) and Keep Pump ON/OFF based on settings
-                _handler.WriteSingleRegister(ms, 20, 0); 
+                // Close Valve (Relay 1 = 0)
+                _handler.TryWriteSingleRegister(ms, 20, 0);
 
-                // Set all MFC flows to 0 and turn off all DACs
-                for (int ch = 1; ch <= 6; ch++)
-                {
-                    WriteMfcFlow(ms, ch, 0.0);
-                }
+                // Set all MFC flows to 0 in one batch
+                double[] zeroFlows = new double[] { 0, 0, 0, 0, 0, 0 };
+                BatchWriteAllMfcFlows(ms, zeroFlows, CancellationToken.None);
             }
             catch { }
         }

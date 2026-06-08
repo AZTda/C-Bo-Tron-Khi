@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Ports;
 using System.Net.Sockets;
@@ -6,6 +8,42 @@ using System.Threading;
 
 namespace Bo_Tron_Khi_CS
 {
+    // ===================================================
+    // MODBUS RESULT — structured return instead of exceptions
+    // ===================================================
+    public class ModbusResult<T>
+    {
+        public bool Success { get; set; }
+        public T Data { get; set; }
+        public string ErrorMessage { get; set; }
+        public int RetryCount { get; set; } // how many retries before success (0 = first try)
+
+        public static ModbusResult<T> Ok(T data, int retries = 0) =>
+            new ModbusResult<T> { Success = true, Data = data, RetryCount = retries };
+
+        public static ModbusResult<T> Fail(string error, int retries = 0) =>
+            new ModbusResult<T> { Success = false, ErrorMessage = error, RetryCount = retries };
+    }
+
+    // ===================================================
+    // CONNECTION HEALTH EVENT
+    // ===================================================
+    public class ConnectionHealthEventArgs : EventArgs
+    {
+        public int ConsecutiveErrors { get; }
+        public bool IsHealthy { get; }
+        public string LastError { get; }
+        public ConnectionHealthEventArgs(int errors, bool healthy, string lastErr)
+        {
+            ConsecutiveErrors = errors;
+            IsHealthy = healthy;
+            LastError = lastErr;
+        }
+    }
+
+    // ===================================================
+    // MODBUS HANDLER — Robust Communication Engine
+    // ===================================================
     public class ModbusHandler
     {
         private SerialPort _serialPort;
@@ -13,6 +51,25 @@ namespace Bo_Tron_Khi_CS
         private NetworkStream _tcpStream;
         private readonly object _lock = new object();
         private ushort _transactionId = 0;
+
+        // Event-driven RX buffer (replaces blocking Read)
+        private readonly List<byte> _rxBuffer = new List<byte>();
+        private readonly ManualResetEventSlim _rxSignal = new ManualResetEventSlim(false);
+        private readonly object _rxLock = new object();
+
+        // RTU inter-frame timing
+        private DateTime _lastTransactionEnd = DateTime.MinValue;
+        private double _silentIntervalMs = 2.0; // 3.5 char times, recalculated on connect
+
+        // Retry configuration
+        public int MaxRetries { get; set; } = 3;
+        private static readonly int[] BackoffMs = { 50, 100, 200 };
+
+        // Health monitoring
+        private int _consecutiveErrors = 0;
+        private const int HealthThreshold = 5;
+        public int ConsecutiveErrors => _consecutiveErrors;
+        public event EventHandler<ConnectionHealthEventArgs> ConnectionHealthChanged;
 
         // Config properties
         public string Port { get; set; } = "Virtual Sim";
@@ -54,6 +111,9 @@ namespace Bo_Tron_Khi_CS
 
         private readonly Random _rand = new Random();
 
+        // ===================================================
+        // CONNECTION MANAGEMENT
+        // ===================================================
         public bool Connect()
         {
             lock (_lock)
@@ -62,6 +122,7 @@ namespace Bo_Tron_Khi_CS
                 if (Port == "Virtual Sim")
                 {
                     IsConnected = true;
+                    _consecutiveErrors = 0;
                     return true;
                 }
 
@@ -84,18 +145,29 @@ namespace Bo_Tron_Khi_CS
                     }
                     else
                     {
-                        Parity p = System.IO.Ports.Parity.Even;
+                        System.IO.Ports.Parity p = System.IO.Ports.Parity.Even;
                         if (Parity == "O") p = System.IO.Ports.Parity.Odd;
                         else if (Parity == "N") p = System.IO.Ports.Parity.None;
 
                         _serialPort = new SerialPort(Port, Baudrate, p, 8, StopBits.One)
                         {
                             ReadTimeout = (int)(Timeout * 1000),
-                            WriteTimeout = (int)(Timeout * 1000)
+                            WriteTimeout = (int)(Timeout * 1000),
+                            ReceivedBytesThreshold = 1 // fire DataReceived ASAP
                         };
+
+                        // Event-driven: wire up DataReceived BEFORE opening
+                        _serialPort.DataReceived += OnSerialDataReceived;
                         _serialPort.Open();
+
+                        // Calculate RTU inter-frame silent interval
+                        // Modbus RTU: 3.5 character times, each char = 11 bits (start + 8data + parity + stop)
+                        _silentIntervalMs = (3.5 * 11.0 / Baudrate) * 1000.0;
+                        if (_silentIntervalMs < 1.75) _silentIntervalMs = 1.75; // minimum 1.75ms per Modbus spec for high baudrates
                     }
+
                     IsConnected = true;
+                    _consecutiveErrors = 0;
                     return true;
                 }
                 catch (Exception)
@@ -112,7 +184,11 @@ namespace Bo_Tron_Khi_CS
             {
                 try
                 {
-                    _serialPort?.Close();
+                    if (_serialPort != null)
+                    {
+                        _serialPort.DataReceived -= OnSerialDataReceived;
+                        _serialPort.Close();
+                    }
                     _serialPort = null;
 
                     _tcpStream?.Close();
@@ -126,209 +202,527 @@ namespace Bo_Tron_Khi_CS
             }
         }
 
-        public ushort[] ReadHoldingRegisters(byte slave, ushort startAddress, ushort count)
+        // ===================================================
+        // EVENT-DRIVEN SERIAL RX
+        // ===================================================
+        private void OnSerialDataReceived(object sender, SerialDataReceivedEventArgs e)
+        {
+            try
+            {
+                var sp = sender as SerialPort;
+                if (sp == null || !sp.IsOpen) return;
+
+                int available = sp.BytesToRead;
+                if (available <= 0) return;
+
+                byte[] chunk = new byte[available];
+                int read = sp.Read(chunk, 0, available);
+
+                if (read > 0)
+                {
+                    lock (_rxLock)
+                    {
+                        _rxBuffer.AddRange(new ArraySegment<byte>(chunk, 0, read));
+                        _rxSignal.Set(); // Wake up anyone waiting for data
+                    }
+                }
+            }
+            catch { /* port closed during read — safe to ignore */ }
+        }
+
+        /// <summary>
+        /// Wait for at least 'count' bytes to arrive in the RX buffer.
+        /// Uses ManualResetEventSlim for efficient wake-on-data instead of blocking Read.
+        /// Returns the bytes or null on timeout/cancellation.
+        /// </summary>
+        private byte[] WaitForBytes(int count, int timeoutMs, CancellationToken ct)
+        {
+            var sw = Stopwatch.StartNew();
+
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                lock (_rxLock)
+                {
+                    if (_rxBuffer.Count >= count)
+                    {
+                        byte[] result = new byte[count];
+                        _rxBuffer.CopyTo(0, result, 0, count);
+                        _rxBuffer.RemoveRange(0, count);
+                        return result;
+                    }
+                    _rxSignal.Reset(); // prepare to wait
+                }
+
+                // Wait for new data or timeout, whichever comes first
+                int remaining = Math.Max(1, timeoutMs - (int)sw.ElapsedMilliseconds);
+                _rxSignal.Wait(Math.Min(remaining, 50), ct); // check every 50ms max
+            }
+
+            return null; // timeout
+        }
+
+        /// <summary>
+        /// Read exactly 'count' bytes from TCP stream with timeout and cancellation.
+        /// </summary>
+        private byte[] TcpReadBytes(int count, int timeoutMs, CancellationToken ct)
+        {
+            byte[] buffer = new byte[count];
+            int total = 0;
+            var sw = Stopwatch.StartNew();
+
+            while (total < count && sw.ElapsedMilliseconds < timeoutMs)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                try
+                {
+                    int read = _tcpStream.Read(buffer, total, count - total);
+                    if (read <= 0) break;
+                    total += read;
+                }
+                catch (IOException) { break; }
+            }
+
+            return total >= count ? buffer : null;
+        }
+
+        // ===================================================
+        // RTU INTER-FRAME TIMING
+        // ===================================================
+        private void EnforceInterFrameDelay()
+        {
+            if (IsTcp) return; // TCP/IP doesn't need inter-frame delay
+
+            double elapsed = (DateTime.Now - _lastTransactionEnd).TotalMilliseconds;
+            if (elapsed < _silentIntervalMs)
+            {
+                int waitMs = (int)Math.Ceiling(_silentIntervalMs - elapsed);
+                if (waitMs > 0) Thread.Sleep(waitMs);
+            }
+        }
+
+        // ===================================================
+        // PUBLIC API — New (ModbusResult<T>)
+        // ===================================================
+        public ModbusResult<ushort[]> TryReadHoldingRegisters(byte slave, ushort startAddress, ushort count, CancellationToken ct = default)
         {
             if (Port == "Virtual Sim")
             {
                 UpdateSimulation();
-                return SimReadHolding(slave, startAddress, count);
+                return ModbusResult<ushort[]>.Ok(SimReadHolding(slave, startAddress, count));
             }
-
-            return PerformModbusTransaction(slave, 0x03, startAddress, count, null);
+            return PerformReadTransaction(slave, 0x03, startAddress, count, ct);
         }
 
-        public ushort[] ReadInputRegisters(byte slave, ushort startAddress, ushort count)
+        public ModbusResult<ushort[]> TryReadInputRegisters(byte slave, ushort startAddress, ushort count, CancellationToken ct = default)
         {
             if (Port == "Virtual Sim")
             {
                 UpdateSimulation();
-                return SimReadInput(slave, startAddress, count);
+                return ModbusResult<ushort[]>.Ok(SimReadInput(slave, startAddress, count));
             }
-
-            return PerformModbusTransaction(slave, 0x04, startAddress, count, null);
+            return PerformReadTransaction(slave, 0x04, startAddress, count, ct);
         }
 
-        public void WriteSingleRegister(byte slave, ushort address, ushort value)
+        public ModbusResult<bool> TryWriteSingleRegister(byte slave, ushort address, ushort value, CancellationToken ct = default)
         {
             if (Port == "Virtual Sim")
             {
                 SimWriteSingle(slave, address, value);
-                return;
+                return ModbusResult<bool>.Ok(true);
             }
-
-            PerformModbusTransaction(slave, 0x06, address, value, null);
+            return PerformWriteTransaction(slave, 0x06, address, value, null, ct);
         }
 
-        public void WriteMultipleRegisters(byte slave, ushort startAddress, ushort[] values)
+        public ModbusResult<bool> TryWriteMultipleRegisters(byte slave, ushort startAddress, ushort[] values, CancellationToken ct = default)
         {
             if (Port == "Virtual Sim")
             {
                 SimWriteMultiple(slave, startAddress, values);
-                return;
+                return ModbusResult<bool>.Ok(true);
             }
-
-            PerformModbusTransaction(slave, 0x10, startAddress, (ushort)values.Length, values);
+            return PerformWriteTransaction(slave, 0x10, startAddress, (ushort)values.Length, values, ct);
         }
 
-        private ushort[] PerformModbusTransaction(byte slave, byte functionCode, ushort addressOrQty, ushort countOrValue, ushort[] writeValues)
+        // ===================================================
+        // PUBLIC API — Legacy (backward-compatible wrappers)
+        // These throw exceptions on failure like the old API
+        // ===================================================
+        public ushort[] ReadHoldingRegisters(byte slave, ushort startAddress, ushort count)
         {
-            lock (_lock)
+            var result = TryReadHoldingRegisters(slave, startAddress, count);
+            if (!result.Success) throw new IOException(result.ErrorMessage);
+            return result.Data;
+        }
+
+        public ushort[] ReadInputRegisters(byte slave, ushort startAddress, ushort count)
+        {
+            var result = TryReadInputRegisters(slave, startAddress, count);
+            if (!result.Success) throw new IOException(result.ErrorMessage);
+            return result.Data;
+        }
+
+        public void WriteSingleRegister(byte slave, ushort address, ushort value)
+        {
+            var result = TryWriteSingleRegister(slave, address, value);
+            if (!result.Success) throw new IOException(result.ErrorMessage);
+        }
+
+        public void WriteMultipleRegisters(byte slave, ushort startAddress, ushort[] values)
+        {
+            var result = TryWriteMultipleRegisters(slave, startAddress, values);
+            if (!result.Success) throw new IOException(result.ErrorMessage);
+        }
+
+        // ===================================================
+        // CORE TRANSACTION ENGINE — with retry + event-driven RX
+        // ===================================================
+        private ModbusResult<ushort[]> PerformReadTransaction(byte slave, byte fc, ushort addr, ushort count, CancellationToken ct)
+        {
+            string lastError = null;
+
+            for (int attempt = 0; attempt <= MaxRetries; attempt++)
             {
-                if (!IsConnected) throw new InvalidOperationException("Not connected to Modbus");
+                ct.ThrowIfCancellationRequested();
 
-                byte[] request;
-                if (IsTcp)
+                // Backoff delay before retry (not on first attempt)
+                if (attempt > 0)
                 {
-                    _transactionId++;
-                    int dataLen = (functionCode == 0x10) ? (7 + writeValues.Length * 2) : 6;
-                    request = new byte[7 + dataLen];
-                    
-                    // MBAP Header
-                    request[0] = (byte)(_transactionId >> 8);
-                    request[1] = (byte)(_transactionId & 0xFF);
-                    request[2] = 0; // Proto ID
-                    request[3] = 0;
-                    request[4] = (byte)(dataLen >> 8);
-                    request[5] = (byte)(dataLen & 0xFF);
-                    request[6] = slave;
-
-                    // PDU
-                    request[7] = functionCode;
-                    request[8] = (byte)(addressOrQty >> 8);
-                    request[9] = (byte)(addressOrQty & 0xFF);
-                    request[10] = (byte)(countOrValue >> 8);
-                    request[11] = (byte)(countOrValue & 0xFF);
-
-                    if (functionCode == 0x10)
-                    {
-                        request[12] = (byte)(writeValues.Length * 2);
-                        for (int i = 0; i < writeValues.Length; i++)
-                        {
-                            request[13 + i * 2] = (byte)(writeValues[i] >> 8);
-                            request[14 + i * 2] = (byte)(writeValues[i] & 0xFF);
-                        }
-                    }
+                    int backoff = (attempt - 1 < BackoffMs.Length) ? BackoffMs[attempt - 1] : BackoffMs[BackoffMs.Length - 1];
+                    Thread.Sleep(backoff);
                 }
-                else
-                {
-                    // RTU Request
-                    int reqLen = (functionCode == 0x10) ? (9 + writeValues.Length * 2) : 8;
-                    request = new byte[reqLen];
-                    request[0] = slave;
-                    request[1] = functionCode;
-                    request[2] = (byte)(addressOrQty >> 8);
-                    request[3] = (byte)(addressOrQty & 0xFF);
-                    request[4] = (byte)(countOrValue >> 8);
-                    request[5] = (byte)(countOrValue & 0xFF);
 
-                    if (functionCode == 0x10)
+                lock (_lock)
+                {
+                    if (!IsConnected)
                     {
-                        request[6] = (byte)(writeValues.Length * 2);
-                        for (int i = 0; i < writeValues.Length; i++)
-                        {
-                            request[7 + i * 2] = (byte)(writeValues[i] >> 8);
-                            request[8 + i * 2] = (byte)(writeValues[i] & 0xFF);
-                        }
+                        lastError = "Not connected to Modbus";
+                        continue;
                     }
 
-                    ushort crc = CalculateCRC(request, reqLen - 2);
-                    request[reqLen - 2] = (byte)(crc & 0xFF);
-                    request[reqLen - 1] = (byte)(crc >> 8);
-                }
+                    try
+                    {
+                        // 1. Enforce RTU inter-frame silence
+                        EnforceInterFrameDelay();
 
-                // Send request
-                if (IsTcp)
+                        // 2. Build request
+                        byte[] request = BuildReadRequest(slave, fc, addr, count);
+
+                        // 3. Flush RX buffer and send
+                        FlushRxBuffer();
+                        SendRequest(request);
+
+                        // 4. Wait for response (event-driven, not blocking)
+                        int timeoutMs = (int)(Timeout * 1000);
+                        ushort[] registers = ReceiveReadResponse(slave, fc, count, timeoutMs, ct);
+
+                        // 5. Success — update health and return
+                        _lastTransactionEnd = DateTime.Now;
+                        RecordSuccess();
+                        return ModbusResult<ushort[]>.Ok(registers, attempt);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        lastError = ex.Message;
+                        _lastTransactionEnd = DateTime.Now;
+                    }
+                }
+            }
+
+            // All retries exhausted
+            RecordError(lastError);
+            return ModbusResult<ushort[]>.Fail($"Read failed after {MaxRetries + 1} attempts: {lastError}", MaxRetries);
+        }
+
+        private ModbusResult<bool> PerformWriteTransaction(byte slave, byte fc, ushort addrOrQty, ushort countOrValue, ushort[] writeValues, CancellationToken ct)
+        {
+            string lastError = null;
+
+            for (int attempt = 0; attempt <= MaxRetries; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (attempt > 0)
                 {
-                    _tcpStream.Write(request, 0, request.Length);
+                    int backoff = (attempt - 1 < BackoffMs.Length) ? BackoffMs[attempt - 1] : BackoffMs[BackoffMs.Length - 1];
+                    Thread.Sleep(backoff);
                 }
-                else
+
+                lock (_lock)
                 {
-                    _serialPort.DiscardInBuffer();
-                    _serialPort.Write(request, 0, request.Length);
+                    if (!IsConnected)
+                    {
+                        lastError = "Not connected to Modbus";
+                        continue;
+                    }
+
+                    try
+                    {
+                        EnforceInterFrameDelay();
+
+                        byte[] request = BuildWriteRequest(slave, fc, addrOrQty, countOrValue, writeValues);
+
+                        FlushRxBuffer();
+                        SendRequest(request);
+
+                        int timeoutMs = (int)(Timeout * 1000);
+                        ReceiveWriteResponse(slave, fc, timeoutMs, ct);
+
+                        _lastTransactionEnd = DateTime.Now;
+                        RecordSuccess();
+                        return ModbusResult<bool>.Ok(true, attempt);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        lastError = ex.Message;
+                        _lastTransactionEnd = DateTime.Now;
+                    }
+                }
+            }
+
+            RecordError(lastError);
+            return ModbusResult<bool>.Fail($"Write failed after {MaxRetries + 1} attempts: {lastError}", MaxRetries);
+        }
+
+        // ===================================================
+        // REQUEST BUILDERS
+        // ===================================================
+        private byte[] BuildReadRequest(byte slave, byte fc, ushort addr, ushort count)
+        {
+            if (IsTcp)
+            {
+                _transactionId++;
+                byte[] request = new byte[12];
+                request[0] = (byte)(_transactionId >> 8);
+                request[1] = (byte)(_transactionId & 0xFF);
+                request[2] = 0; request[3] = 0; // Protocol ID
+                request[4] = 0; request[5] = 6; // Length
+                request[6] = slave;
+                request[7] = fc;
+                request[8] = (byte)(addr >> 8);
+                request[9] = (byte)(addr & 0xFF);
+                request[10] = (byte)(count >> 8);
+                request[11] = (byte)(count & 0xFF);
+                return request;
+            }
+            else
+            {
+                byte[] request = new byte[8];
+                request[0] = slave;
+                request[1] = fc;
+                request[2] = (byte)(addr >> 8);
+                request[3] = (byte)(addr & 0xFF);
+                request[4] = (byte)(count >> 8);
+                request[5] = (byte)(count & 0xFF);
+                ushort crc = CalculateCRC(request, 6);
+                request[6] = (byte)(crc & 0xFF);
+                request[7] = (byte)(crc >> 8);
+                return request;
+            }
+        }
+
+        private byte[] BuildWriteRequest(byte slave, byte fc, ushort addr, ushort countOrValue, ushort[] writeValues)
+        {
+            if (IsTcp)
+            {
+                _transactionId++;
+                int pduLen = (fc == 0x10) ? (7 + writeValues.Length * 2) : 6;
+                byte[] request = new byte[6 + pduLen];
+
+                // MBAP Header
+                request[0] = (byte)(_transactionId >> 8);
+                request[1] = (byte)(_transactionId & 0xFF);
+                request[2] = 0; request[3] = 0;
+                request[4] = (byte)(pduLen >> 8);
+                request[5] = (byte)(pduLen & 0xFF);
+                request[6] = slave;
+                request[7] = fc;
+                request[8] = (byte)(addr >> 8);
+                request[9] = (byte)(addr & 0xFF);
+                request[10] = (byte)(countOrValue >> 8);
+                request[11] = (byte)(countOrValue & 0xFF);
+
+                if (fc == 0x10)
+                {
+                    request[12] = (byte)(writeValues.Length * 2);
+                    for (int i = 0; i < writeValues.Length; i++)
+                    {
+                        request[13 + i * 2] = (byte)(writeValues[i] >> 8);
+                        request[14 + i * 2] = (byte)(writeValues[i] & 0xFF);
+                    }
+                }
+                return request;
+            }
+            else
+            {
+                int reqLen = (fc == 0x10) ? (9 + writeValues.Length * 2) : 8;
+                byte[] request = new byte[reqLen];
+                request[0] = slave;
+                request[1] = fc;
+                request[2] = (byte)(addr >> 8);
+                request[3] = (byte)(addr & 0xFF);
+                request[4] = (byte)(countOrValue >> 8);
+                request[5] = (byte)(countOrValue & 0xFF);
+
+                if (fc == 0x10)
+                {
+                    request[6] = (byte)(writeValues.Length * 2);
+                    for (int i = 0; i < writeValues.Length; i++)
+                    {
+                        request[7 + i * 2] = (byte)(writeValues[i] >> 8);
+                        request[8 + i * 2] = (byte)(writeValues[i] & 0xFF);
+                    }
                 }
 
-                // Read response
-                byte[] header = new byte[IsTcp ? 9 : 3];
-                int readBytes = ReadBuffer(header, header.Length);
-                if (readBytes < header.Length) throw new IOException("Timeout reading Modbus response header");
+                ushort crc = CalculateCRC(request, reqLen - 2);
+                request[reqLen - 2] = (byte)(crc & 0xFF);
+                request[reqLen - 1] = (byte)(crc >> 8);
+                return request;
+            }
+        }
 
-                byte responseFC = IsTcp ? header[7] : header[1];
+        // ===================================================
+        // SEND + RECEIVE (event-driven)
+        // ===================================================
+        private void FlushRxBuffer()
+        {
+            if (IsTcp) return;
+            lock (_rxLock)
+            {
+                _rxBuffer.Clear();
+                _rxSignal.Reset();
+            }
+            try { _serialPort?.DiscardInBuffer(); } catch { }
+        }
+
+        private void SendRequest(byte[] request)
+        {
+            if (IsTcp)
+            {
+                _tcpStream.Write(request, 0, request.Length);
+            }
+            else
+            {
+                _serialPort.Write(request, 0, request.Length);
+            }
+        }
+
+        private ushort[] ReceiveReadResponse(byte slave, byte fc, ushort expectedCount, int timeoutMs, CancellationToken ct)
+        {
+            if (IsTcp)
+            {
+                // TCP: MBAP header (7) + FC (1) + byteCount (1) = 9 bytes minimum
+                byte[] header = TcpReadBytes(9, timeoutMs, ct);
+                if (header == null) throw new IOException("Timeout reading TCP Modbus response header");
+
+                byte responseFC = header[7];
                 if ((responseFC & 0x80) != 0)
-                {
-                    // Exception response
-                    int errCode = IsTcp ? header[8] : header[2];
-                    throw new Exception($"Modbus Exception received: 0x{errCode:X2}");
-                }
+                    throw new Exception($"Modbus Exception: 0x{header[8]:X2}");
 
-                if (functionCode == 0x03 || functionCode == 0x04)
-                {
-                    // Read functions: read the payload data
-                    byte byteCount = IsTcp ? header[8] : header[2];
-                    byte[] data = new byte[byteCount + (IsTcp ? 0 : 2)];
-                    readBytes = ReadBuffer(data, data.Length);
-                    if (readBytes < data.Length) throw new IOException("Timeout reading Modbus response data");
+                byte byteCount = header[8];
+                byte[] data = TcpReadBytes(byteCount, timeoutMs, ct);
+                if (data == null) throw new IOException("Timeout reading TCP Modbus response data");
 
-                    if (!IsTcp)
-                    {
-                        // Validate CRC
-                        byte[] allResponse = new byte[header.Length + data.Length];
-                        Buffer.BlockCopy(header, 0, allResponse, 0, header.Length);
-                        Buffer.BlockCopy(data, 0, allResponse, header.Length, data.Length);
-                        ushort responseCRC = (ushort)(data[byteCount] | (data[byteCount + 1] << 8));
-                        if (CalculateCRC(allResponse, allResponse.Length - 2) != responseCRC)
-                            throw new IOException("CRC mismatch in Modbus RTU response");
-                    }
-
-                    ushort[] registers = new ushort[byteCount / 2];
-                    for (int i = 0; i < registers.Length; i++)
-                    {
-                        registers[i] = (ushort)((data[i * 2] << 8) | data[i * 2 + 1]);
-                    }
-                    return registers;
-                }
-                else
-                {
-                    // Write functions: read rest of frame (echo parameters or count)
-                    byte[] remaining = new byte[IsTcp ? 3 : (functionCode == 0x10 ? 5 : 5)];
-                    readBytes = ReadBuffer(remaining, remaining.Length);
-                    if (readBytes < remaining.Length) throw new IOException("Timeout reading Modbus write response");
-
-                    if (!IsTcp)
-                    {
-                        // Validate CRC
-                        byte[] allResponse = new byte[header.Length + remaining.Length];
-                        Buffer.BlockCopy(header, 0, allResponse, 0, header.Length);
-                        Buffer.BlockCopy(remaining, 0, allResponse, header.Length, remaining.Length);
-                        ushort responseCRC = (ushort)(remaining[remaining.Length - 2] | (remaining[remaining.Length - 1] << 8));
-                        if (CalculateCRC(allResponse, allResponse.Length - 2) != responseCRC)
-                            throw new IOException("CRC mismatch in Modbus RTU response");
-                    }
-
-                    return null;
-                }
+                ushort[] registers = new ushort[byteCount / 2];
+                for (int i = 0; i < registers.Length; i++)
+                    registers[i] = (ushort)((data[i * 2] << 8) | data[i * 2 + 1]);
+                return registers;
             }
-        }
-
-        private int ReadBuffer(byte[] buffer, int length)
-        {
-            int total = 0;
-            while (total < length)
+            else
             {
-                int read;
-                if (IsTcp)
+                // RTU: slave(1) + FC(1) + byteCount(1) = 3 header bytes
+                byte[] header = WaitForBytes(3, timeoutMs, ct);
+                if (header == null) throw new IOException("Timeout waiting for RTU response header (no data from device)");
+
+                if (header[0] != slave)
+                    throw new IOException($"Slave address mismatch: expected {slave}, got {header[0]}");
+
+                if ((header[1] & 0x80) != 0)
                 {
-                    read = _tcpStream.Read(buffer, total, length - total);
+                    // Exception response: need 2 more bytes (error code + CRC)
+                    byte[] errTail = WaitForBytes(2, timeoutMs, ct);
+                    throw new Exception($"Modbus Exception: 0x{header[2]:X2}");
                 }
-                else
-                {
-                    read = _serialPort.Read(buffer, total, length - total);
-                }
-                if (read <= 0) break;
-                total += read;
+
+                byte byteCount = header[2];
+                // Data bytes + 2 CRC bytes
+                byte[] dataPlusCrc = WaitForBytes(byteCount + 2, timeoutMs, ct);
+                if (dataPlusCrc == null) throw new IOException("Timeout waiting for RTU response data");
+
+                // Validate CRC over entire response
+                byte[] fullResponse = new byte[3 + byteCount + 2];
+                Buffer.BlockCopy(header, 0, fullResponse, 0, 3);
+                Buffer.BlockCopy(dataPlusCrc, 0, fullResponse, 3, byteCount + 2);
+
+                ushort receivedCrc = (ushort)(dataPlusCrc[byteCount] | (dataPlusCrc[byteCount + 1] << 8));
+                ushort calculatedCrc = CalculateCRC(fullResponse, fullResponse.Length - 2);
+                if (receivedCrc != calculatedCrc)
+                    throw new IOException($"CRC mismatch: received 0x{receivedCrc:X4}, calculated 0x{calculatedCrc:X4}");
+
+                ushort[] registers = new ushort[byteCount / 2];
+                for (int i = 0; i < registers.Length; i++)
+                    registers[i] = (ushort)((dataPlusCrc[i * 2] << 8) | dataPlusCrc[i * 2 + 1]);
+                return registers;
             }
-            return total;
         }
 
+        private void ReceiveWriteResponse(byte slave, byte fc, int timeoutMs, CancellationToken ct)
+        {
+            if (IsTcp)
+            {
+                // TCP write response: MBAP(7) + FC(1) + addr(2) + qty/val(2) = 12 bytes
+                byte[] resp = TcpReadBytes(12, timeoutMs, ct);
+                if (resp == null) throw new IOException("Timeout reading TCP write response");
+
+                if ((resp[7] & 0x80) != 0)
+                    throw new Exception($"Modbus Exception: 0x{resp[8]:X2}");
+            }
+            else
+            {
+                // RTU write response: slave(1) + FC(1) + addr(2) + val/qty(2) + CRC(2) = 8 bytes
+                byte[] resp = WaitForBytes(8, timeoutMs, ct);
+                if (resp == null) throw new IOException("Timeout waiting for RTU write response");
+
+                if (resp[0] != slave)
+                    throw new IOException($"Slave address mismatch: expected {slave}, got {resp[0]}");
+
+                if ((resp[1] & 0x80) != 0)
+                    throw new Exception($"Modbus Exception: 0x{resp[2]:X2}");
+
+                // Validate CRC
+                ushort receivedCrc = (ushort)(resp[6] | (resp[7] << 8));
+                ushort calculatedCrc = CalculateCRC(resp, 6);
+                if (receivedCrc != calculatedCrc)
+                    throw new IOException($"CRC mismatch in write response");
+            }
+        }
+
+        // ===================================================
+        // HEALTH MONITORING
+        // ===================================================
+        private void RecordSuccess()
+        {
+            if (_consecutiveErrors > 0)
+            {
+                _consecutiveErrors = 0;
+                ConnectionHealthChanged?.Invoke(this, new ConnectionHealthEventArgs(0, true, null));
+            }
+        }
+
+        private void RecordError(string error)
+        {
+            _consecutiveErrors++;
+            bool wasHealthy = _consecutiveErrors <= HealthThreshold;
+            ConnectionHealthChanged?.Invoke(this, new ConnectionHealthEventArgs(_consecutiveErrors, _consecutiveErrors < HealthThreshold, error));
+        }
+
+        // ===================================================
+        // UTILITIES
+        // ===================================================
         public static ushort CalculateCRC(byte[] data, int length)
         {
             ushort crc = 0xFFFF;
@@ -599,6 +993,10 @@ namespace Bo_Tron_Khi_CS
                         if (param == 0 && vals.Length >= i + 2)
                         {
                             _simSccmSP[ch] = RegsToFloat(vals[i], vals[i+1]);
+                        }
+                        else if (param == 2)
+                        {
+                            _simDacEn[ch] = vals[i];
                         }
                     }
                 }
