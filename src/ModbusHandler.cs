@@ -52,11 +52,6 @@ namespace Bo_Tron_Khi_CS
         private readonly object _lock = new object();
         private ushort _transactionId = 0;
 
-        // Event-driven RX buffer (replaces blocking Read)
-        private readonly List<byte> _rxBuffer = new List<byte>();
-        private readonly ManualResetEventSlim _rxSignal = new ManualResetEventSlim(false);
-        private readonly object _rxLock = new object();
-
         // RTU inter-frame timing
         private DateTime _lastTransactionEnd = DateTime.MinValue;
         private double _silentIntervalMs = 2.0; // 3.5 char times, recalculated on connect
@@ -152,12 +147,9 @@ namespace Bo_Tron_Khi_CS
                         _serialPort = new SerialPort(Port, Baudrate, p, 8, StopBits.One)
                         {
                             ReadTimeout = (int)(Timeout * 1000),
-                            WriteTimeout = (int)(Timeout * 1000),
-                            ReceivedBytesThreshold = 1 // fire DataReceived ASAP
+                            WriteTimeout = (int)(Timeout * 1000)
                         };
 
-                        // Event-driven: wire up DataReceived BEFORE opening
-                        _serialPort.DataReceived += OnSerialDataReceived;
                         _serialPort.Open();
 
                         // Calculate RTU inter-frame silent interval
@@ -186,7 +178,6 @@ namespace Bo_Tron_Khi_CS
                 {
                     if (_serialPort != null)
                     {
-                        _serialPort.DataReceived -= OnSerialDataReceived;
                         _serialPort.Close();
                     }
                     _serialPort = null;
@@ -203,64 +194,56 @@ namespace Bo_Tron_Khi_CS
         }
 
         // ===================================================
-        // EVENT-DRIVEN SERIAL RX
+        // SYNCHRONOUS SERIAL RX
         // ===================================================
-        private void OnSerialDataReceived(object sender, SerialDataReceivedEventArgs e)
-        {
-            try
-            {
-                var sp = sender as SerialPort;
-                if (sp == null || !sp.IsOpen) return;
-
-                int available = sp.BytesToRead;
-                if (available <= 0) return;
-
-                byte[] chunk = new byte[available];
-                int read = sp.Read(chunk, 0, available);
-
-                if (read > 0)
-                {
-                    lock (_rxLock)
-                    {
-                        _rxBuffer.AddRange(new ArraySegment<byte>(chunk, 0, read));
-                        _rxSignal.Set(); // Wake up anyone waiting for data
-                    }
-                }
-            }
-            catch { /* port closed during read — safe to ignore */ }
-        }
-
         /// <summary>
-        /// Wait for at least 'count' bytes to arrive in the RX buffer.
-        /// Uses ManualResetEventSlim for efficient wake-on-data instead of blocking Read.
+        /// Wait for at least 'count' bytes to arrive by polling the serial port.
         /// Returns the bytes or null on timeout/cancellation.
         /// </summary>
         private byte[] WaitForBytes(int count, int timeoutMs, CancellationToken ct)
         {
+            byte[] result = new byte[count];
+            int total = 0;
             var sw = Stopwatch.StartNew();
 
-            while (sw.ElapsedMilliseconds < timeoutMs)
+            while (total < count)
             {
                 ct.ThrowIfCancellationRequested();
 
-                lock (_rxLock)
+                if (sw.ElapsedMilliseconds >= timeoutMs)
                 {
-                    if (_rxBuffer.Count >= count)
-                    {
-                        byte[] result = new byte[count];
-                        _rxBuffer.CopyTo(0, result, 0, count);
-                        _rxBuffer.RemoveRange(0, count);
-                        return result;
-                    }
-                    _rxSignal.Reset(); // prepare to wait
+                    return null; // timeout
                 }
 
-                // Wait for new data or timeout, whichever comes first
-                int remaining = Math.Max(1, timeoutMs - (int)sw.ElapsedMilliseconds);
-                _rxSignal.Wait(Math.Min(remaining, 50), ct); // check every 50ms max
+                try
+                {
+                    if (_serialPort == null || !_serialPort.IsOpen)
+                    {
+                        return null;
+                    }
+
+                    int available = _serialPort.BytesToRead;
+                    if (available > 0)
+                    {
+                        int toRead = Math.Min(available, count - total);
+                        int read = _serialPort.Read(result, total, toRead);
+                        if (read > 0)
+                        {
+                            total += read;
+                        }
+                    }
+                    else
+                    {
+                        Thread.Sleep(2); // Yield CPU to prevent pinning
+                    }
+                }
+                catch (Exception)
+                {
+                    return null;
+                }
             }
 
-            return null; // timeout
+            return result;
         }
 
         /// <summary>
@@ -591,11 +574,6 @@ namespace Bo_Tron_Khi_CS
         private void FlushRxBuffer()
         {
             if (IsTcp) return;
-            lock (_rxLock)
-            {
-                _rxBuffer.Clear();
-                _rxSignal.Reset();
-            }
             try { _serialPort?.DiscardInBuffer(); } catch { }
         }
 
